@@ -5,7 +5,66 @@ import type { MomentumSnapshot } from "../../../momentum/application/momentum-tr
 import type { Trade } from "../../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../../screening/token-screener.js";
 import type { NewToken } from "../../../token-discovery/domain/new-token.js";
+import type {
+  HistoryReader,
+  StoredMomentumPoint,
+  StoredScreening,
+  StoredToken,
+  TokenHistory,
+} from "../../domain/history-reader.js";
 import type { HistoryRecorder } from "../../domain/history-recorder.js";
+
+type Row = Record<string, unknown>;
+
+const numberOrNull = (value: unknown): number | null => (typeof value === "number" ? value : null);
+
+const toScreening = (row: Row): StoredScreening => ({
+  mint: String(row["mint"]),
+  symbol: String(row["symbol"] ?? ""),
+  name: String(row["name"] ?? ""),
+  status: row["status"] as StoredScreening["status"],
+  reason: typeof row["reason"] === "string" ? row["reason"] : null,
+  failureCodes: typeof row["failure_codes"] === "string" ? (JSON.parse(row["failure_codes"]) as string[]) : [],
+  top10Pct: numberOrNull(row["top10_pct"]),
+  creatorPct: numberOrNull(row["creator_pct"]),
+  totalHolders: numberOrNull(row["total_holders"]),
+  evaluatedAt: new Date(Number(row["evaluated_at"])),
+});
+
+const toToken = (row: Row): StoredToken => ({
+  mint: String(row["mint"]),
+  symbol: String(row["symbol"]),
+  name: String(row["name"]),
+  creator: String(row["creator"]),
+  metadataUri: String(row["metadata_uri"]),
+  initialBuySol: Number(row["initial_buy_sol"]),
+  marketCapSol: Number(row["market_cap_sol"]),
+  detectedAt: new Date(Number(row["detected_at"])),
+});
+
+const toMomentumPoint = (row: Row): StoredMomentumPoint => ({
+  at: new Date(Number(row["at"])),
+  score: Number(row["score"]),
+  components: {
+    activity: Number(row["activity"]),
+    acceleration: Number(row["acceleration"]),
+    buyPressure: Number(row["buy_pressure"]),
+  },
+  metrics: {
+    uniqueBuyers1m: Number(row["unique_buyers_1m"]),
+    uniqueBuyers5m: Number(row["unique_buyers_5m"]),
+    avgUniqueBuyersPrevMinutes: Number(row["avg_unique_buyers_prev"]),
+    buyVolumeSol5m: Number(row["buy_volume_sol_5m"]),
+    sellVolumeSol5m: Number(row["sell_volume_sol_5m"]),
+    tradeCount5m: Number(row["trade_count_5m"]),
+    medianBuySol5m: Number(row["median_buy_sol_5m"]),
+    priceChange5mPct: Number(row["price_change_5m_pct"]),
+    lastPriceSol: numberOrNull(row["last_price_sol"]),
+  },
+});
+
+const SCREENINGS_WITH_TOKEN = `
+  SELECT s.*, t.symbol, t.name FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint`;
 
 /** All timestamps are stored as Unix epoch milliseconds. */
 const SCHEMA = `
@@ -69,8 +128,8 @@ CREATE TABLE IF NOT EXISTS momentum_snapshots (
 CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
 `;
 
-/** Stores history in a local SQLite file using Node's built-in driver (no dependencies). */
-export class SqliteHistoryRecorder implements HistoryRecorder {
+/** Stores and reads history in a local SQLite file using Node's built-in driver (no dependencies). */
+export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader {
   private readonly db: DatabaseSync;
   private readonly insertToken: StatementSync;
   private readonly insertScreening: StatementSync;
@@ -158,6 +217,27 @@ export class SqliteHistoryRecorder implements HistoryRecorder {
       metrics.priceChange5mPct,
       metrics.lastPriceSol,
     );
+  }
+
+  recentScreenings(limit: number): StoredScreening[] {
+    return this.query(`${SCREENINGS_WITH_TOKEN} ORDER BY s.evaluated_at DESC, s.id DESC LIMIT ?`, limit).map(
+      toScreening,
+    );
+  }
+
+  tokenHistory(mint: string): TokenHistory | null {
+    const tokenRow = this.query("SELECT * FROM tokens WHERE mint = ?", mint)[0];
+    if (tokenRow === undefined) return null;
+
+    const screenings = this.query(
+      `${SCREENINGS_WITH_TOKEN} WHERE s.mint = ? ORDER BY s.evaluated_at DESC, s.id DESC`,
+      mint,
+    ).map(toScreening);
+    const momentum = this.query("SELECT * FROM momentum_snapshots WHERE mint = ? ORDER BY at ASC", mint).map(
+      toMomentumPoint,
+    );
+
+    return { token: toToken(tokenRow), status: screenings[0]?.status ?? "pending", screenings, momentum };
   }
 
   /** Runs a query and returns plain rows; intended for analysis scripts and tests. */
