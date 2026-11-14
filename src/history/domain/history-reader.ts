@@ -41,9 +41,42 @@ export interface TokenHistory {
   readonly momentum: readonly StoredMomentumPoint[];
 }
 
+/** OHLCV of every trade of one token inside one time bucket. Prices are SOL per token. */
+export interface StoredCandle {
+  /** Bucket start. */
+  readonly start: Date;
+  readonly open: number;
+  readonly high: number;
+  readonly low: number;
+  readonly close: number;
+  readonly volumeSol: number;
+  readonly buyVolumeSol: number;
+  readonly sellVolumeSol: number;
+  readonly trades: number;
+}
+
+/** A trade made by the token creator. */
+export interface StoredDevTrade {
+  readonly at: Date;
+  readonly side: "buy" | "sell";
+  readonly solAmount: number;
+}
+
+export interface TokenChart {
+  /** Oldest first; buckets without trades are omitted. */
+  readonly candles: readonly StoredCandle[];
+  /** Oldest first. */
+  readonly devTrades: readonly StoredDevTrade[];
+}
+
 /** Port: read access to stored history. */
 export interface HistoryReader {
   /** Newest first. */
   recentScreenings(limit: number): Promise<StoredScreening[]>;
   tokenHistory(mint: string): Promise<TokenHistory | null>;
+  /**
+   * Candles of `intervalSeconds` built from every stored trade of a token, keeping the most
+   * recent `limit` buckets, plus the creator's trades. Null if the token was never seen.
+   */
+  tokenChart(mint: string, intervalSeconds: number, limit: number): Promise<TokenChart | null>;
 }

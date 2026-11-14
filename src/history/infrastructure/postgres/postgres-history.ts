@@ -3,9 +3,11 @@ import type { MomentumSnapshot } from "../../../momentum/application/momentum-tr
 import type { Trade } from "../../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../../screening/token-screener.js";
 import type { NewToken } from "../../../token-discovery/domain/new-token.js";
-import type { HistoryReader, StoredScreening, TokenHistory } from "../../domain/history-reader.js";
+import type { HistoryReader, StoredScreening, TokenChart, TokenHistory } from "../../domain/history-reader.js";
 import type { HistoryRecorder } from "../../domain/history-recorder.js";
 import {
+  candlesSql,
+  devTradesSql,
   momentumValues,
   SCREENING_COLUMNS,
   SCREENINGS_WITH_TOKEN,
@@ -14,7 +16,10 @@ import {
   toScreening,
   toToken,
   tokenValues,
+  toCandle,
+  toDevTrade,
   tradeValues,
+  type ChartDialect,
   type Row,
   type SqlValue,
 } from "../history-rows.js";
@@ -116,6 +121,9 @@ const UPSERT_MOMENTUM = `INSERT INTO momentum_snapshots (${MOMENTUM_COLUMNS.join
     .map((column) => `${column} = EXCLUDED.${column}`)
     .join(", ")}`;
 
+/** `ctid` follows insertion order in this append-only table (rows are never updated or deleted). */
+const CHART_DIALECT: ChartDialect = { param: (index) => `$${index}`, sequence: "ctid" };
+
 export interface PostgresHistoryOptions {
   /** Called when an idle pooled connection fails (e.g. the server restarts); without it such errors are ignored. */
   readonly onError?: (error: Error) => void;
@@ -194,6 +202,15 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
       screenings,
       momentum: momentumRows.map(toMomentumPoint),
     };
+  }
+
+  async tokenChart(mint: string, intervalSeconds: number, limit: number): Promise<TokenChart | null> {
+    if ((await this.query("SELECT 1 FROM tokens WHERE mint = $1", mint)).length === 0) return null;
+    const [candleRows, devRows] = await Promise.all([
+      this.query(candlesSql(CHART_DIALECT), mint, intervalSeconds, limit),
+      this.query(devTradesSql(CHART_DIALECT), mint),
+    ]);
+    return { candles: candleRows.map(toCandle), devTrades: devRows.map(toDevTrade) };
   }
 
   /**

@@ -347,6 +347,135 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
 
     expect(await history.tokenHistory("nope")).toBeNull();
   });
+
+  describe("token chart", () => {
+    /** 2026-11-13T20:00:00Z in Unix seconds; a multiple of 60 and 300. */
+    const T0 = Date.UTC(2026, 10, 13, 20) / 1000;
+    let sequence = 0;
+    const tradeAt = (ms: number, overrides: Partial<Trade> = {}): Trade => {
+      sequence += 1;
+      return { ...trade, signature: `sig${sequence}`, timestamp: new Date(ms), ...overrides };
+    };
+
+    it("returns null for an unknown token", async () => {
+      const history = await open();
+
+      expect(await history.tokenChart("nope", 60, 300)).toBeNull();
+    });
+
+    it("returns no candles and no dev trades for a token without trades", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+
+      expect(await history.tokenChart("a", 60, 300)).toEqual({ candles: [], devTrades: [] });
+    });
+
+    it("aggregates trades into OHLCV buckets, oldest first, omitting empty buckets", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      const base = T0 * 1000;
+      // First minute: open 2, high 5, low 1, close 3.
+      await history.recordTrade(tradeAt(base + 59_999, { priceSol: 3, side: "sell", solAmount: 0.5 }));
+      await history.recordTrade(tradeAt(base, { priceSol: 2, solAmount: 1 }));
+      await history.recordTrade(tradeAt(base + 10_000, { priceSol: 5, solAmount: 0.25 }));
+      await history.recordTrade(tradeAt(base + 20_000, { priceSol: 1, side: "sell", solAmount: 0.25 }));
+      // Third minute only; the second minute has no trades.
+      await history.recordTrade(tradeAt(base + 120_000, { priceSol: 4, solAmount: 2 }));
+      // Another token never leaks into this chart.
+      await history.recordTrade(tradeAt(base + 30_000, { mint: "b", priceSol: 100 }));
+
+      const chart = await history.tokenChart("a", 60, 300);
+
+      expect(chart?.candles).toEqual([
+        {
+          start: new Date(base),
+          open: 2,
+          high: 5,
+          low: 1,
+          close: 3,
+          volumeSol: 2,
+          buyVolumeSol: 1.25,
+          sellVolumeSol: 0.75,
+          trades: 4,
+        },
+        {
+          start: new Date(base + 120_000),
+          open: 4,
+          high: 4,
+          low: 4,
+          close: 4,
+          volumeSol: 2,
+          buyVolumeSol: 2,
+          sellVolumeSol: 0,
+          trades: 1,
+        },
+      ]);
+    });
+
+    it("splits buckets exactly at the interval boundary", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      const base = T0 * 1000;
+      await history.recordTrade(tradeAt(base + 999, { priceSol: 1 }));
+      await history.recordTrade(tradeAt(base + 1_000, { priceSol: 2 }));
+      await history.recordTrade(tradeAt(base + 299_999, { priceSol: 3 }));
+      await history.recordTrade(tradeAt(base + 300_000, { priceSol: 4 }));
+
+      const seconds = await history.tokenChart("a", 1, 300);
+      const fiveMinutes = await history.tokenChart("a", 300, 300);
+
+      expect(seconds?.candles.map((c) => [c.start.getTime() / 1000 - T0, c.close])).toEqual([
+        [0, 1],
+        [1, 2],
+        [299, 3],
+        [300, 4],
+      ]);
+      expect(fiveMinutes?.candles.map((c) => [c.start.getTime() / 1000 - T0, c.open, c.close, c.trades])).toEqual([
+        [0, 1, 3, 3],
+        [300, 4, 4, 1],
+      ]);
+    });
+
+    it("breaks timestamp ties by insertion order for open and close", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      const at = T0 * 1000 + 5_000;
+      await history.recordTrade(tradeAt(at, { priceSol: 7 }));
+      await history.recordTrade(tradeAt(at, { priceSol: 9 }));
+      await history.recordTrade(tradeAt(at, { priceSol: 8 }));
+
+      const candle = (await history.tokenChart("a", 60, 300))?.candles[0];
+
+      expect(candle).toMatchObject({ open: 7, high: 9, low: 7, close: 8, trades: 3 });
+    });
+
+    it("keeps only the most recent candles up to the limit, oldest first", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      for (let i = 0; i < 5; i += 1) await history.recordTrade(tradeAt((T0 + i) * 1000, { priceSol: i + 1 }));
+
+      const chart = await history.tokenChart("a", 1, 2);
+
+      expect(chart?.candles.map((c) => c.close)).toEqual([4, 5]);
+    });
+
+    it("lists the creator's trades oldest first as dev trades", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { creator: "dev" }));
+      const base = T0 * 1000;
+      await history.recordTrade(tradeAt(base + 61_500, { trader: "dev", side: "sell", solAmount: 1.5 }));
+      await history.recordTrade(tradeAt(base + 1_000, { trader: "dev", side: "buy", solAmount: 0.5 }));
+      await history.recordTrade(tradeAt(base + 2_000, { trader: "fan", side: "buy", solAmount: 3 }));
+      await history.recordTrade(tradeAt(base + 3_000, { mint: "b", trader: "dev", side: "buy", solAmount: 9 }));
+
+      const chart = await history.tokenChart("a", 60, 300);
+
+      expect(chart?.devTrades).toEqual([
+        { at: new Date(base + 1_000), side: "buy", solAmount: 0.5 },
+        { at: new Date(base + 61_500), side: "sell", solAmount: 1.5 },
+      ]);
+    });
+  });
 });
 
 describe("PostgresHistory", () => {

@@ -1,4 +1,5 @@
 import type { MomentumSnapshot } from "../../momentum/application/momentum-tracker.js";
+import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
 
@@ -21,6 +22,25 @@ export type LiveEvent =
 
 export type LiveListener = (event: LiveEvent) => void;
 
+export interface LiveTrade {
+  readonly trade: Trade;
+  /** The trader is the token creator. */
+  readonly isDev: boolean;
+}
+
+export type TradeListener = (live: LiveTrade) => void;
+
+/** Calls every listener; a broken client must never stop the feed for everyone else. */
+const notifyAll = <T>(listeners: Iterable<(value: T) => void>, value: T): void => {
+  for (const listener of listeners) {
+    try {
+      listener(value);
+    } catch {
+      // Ignored on purpose.
+    }
+  }
+};
+
 interface TokenState {
   readonly token: NewToken;
   status: SafetyStatus;
@@ -30,6 +50,8 @@ interface TokenState {
 export class LiveFeed {
   private readonly tokens = new Map<string, TokenState>();
   private readonly listeners = new Set<LiveListener>();
+  /** Per-mint trade listeners; a mint is removed with its last listener. */
+  private readonly tradeListeners = new Map<string, Set<TradeListener>>();
   private movers: readonly Mover[] = [];
   private moversAt: Date | null = null;
   private sources: Record<SourceName, SourceStatus> = { pumpportal: "connecting", solanaLogs: "connecting" };
@@ -68,6 +90,35 @@ export class LiveFeed {
     else if (message.startsWith("disconnected")) this.sourceStatusChanged(source, "disconnected");
   }
 
+  /** Publishes a stored trade to the subscribers of its token. */
+  tradeRecorded(trade: Trade): void {
+    const listeners = this.tradeListeners.get(trade.mint);
+    if (listeners === undefined) return;
+    const creator = this.tokens.get(trade.mint)?.token.creator;
+    notifyAll([...listeners], { trade, isDev: creator !== undefined && trade.trader === creator });
+  }
+
+  subscribeTrades(mint: string, listener: TradeListener): () => void {
+    let listeners = this.tradeListeners.get(mint);
+    if (listeners === undefined) {
+      listeners = new Set();
+      this.tradeListeners.set(mint, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      const current = this.tradeListeners.get(mint);
+      if (current === undefined || !current.delete(listener)) return;
+      if (current.size === 0) this.tradeListeners.delete(mint);
+    };
+  }
+
+  /** Number of open per-token trade subscriptions. */
+  tradeSubscriptionCount(): number {
+    let count = 0;
+    for (const listeners of this.tradeListeners.values()) count += listeners.size;
+    return count;
+  }
+
   getMovers(limit: number): { at: Date | null; movers: readonly Mover[] } {
     return { at: this.moversAt, movers: this.movers.slice(0, limit) };
   }
@@ -89,12 +140,6 @@ export class LiveFeed {
   }
 
   private emit(event: LiveEvent): void {
-    for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch {
-        // A broken client must never stop the feed for everyone else.
-      }
-    }
+    notifyAll(this.listeners, event);
   }
 }

@@ -124,7 +124,14 @@ While running, the screener exposes a read-only JSON + Server-Sent Events API on
 | `GET /api/movers` | Latest momentum ranking |
 | `GET /api/screenings` | Recent safety check results |
 | `GET /api/tokens/:mint` | Full history of one token |
+| `GET /api/tokens/:mint/candles` | OHLCV candles (`interval=1s\|1m\|5m`, `limit`), dev trades and SOL/USD price |
+| `GET /api/tokens/:mint/stream` | Live `trade` and `sol-price` events of one token |
 | `GET /api/stream` | Live `token`, `screening`, `momentum` and `status` events |
+
+Candles are built on request from the stored `trades` table, so they cover every trade of a
+tracked token. The SOL/USD price (for market caps in USD) is polled every minute from free,
+keyless public APIs: Jupiter, falling back to CoinGecko and then Binance. It is `null` while
+none of them answers.
 
 The full contract is in [docs/API.md](docs/API.md).
 

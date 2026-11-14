@@ -5,9 +5,11 @@ import type { MomentumSnapshot } from "../../../momentum/application/momentum-tr
 import type { Trade } from "../../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../../screening/token-screener.js";
 import type { NewToken } from "../../../token-discovery/domain/new-token.js";
-import type { HistoryReader, StoredScreening, TokenHistory } from "../../domain/history-reader.js";
+import type { HistoryReader, StoredScreening, TokenChart, TokenHistory } from "../../domain/history-reader.js";
 import type { HistoryRecorder } from "../../domain/history-recorder.js";
 import {
+  candlesSql,
+  devTradesSql,
   momentumValues,
   SCREENING_COLUMNS,
   SCREENINGS_WITH_TOKEN,
@@ -16,7 +18,10 @@ import {
   toScreening,
   toToken,
   tokenValues,
+  toCandle,
+  toDevTrade,
   tradeValues,
+  type ChartDialect,
   type SqlValue,
 } from "../history-rows.js";
 
@@ -82,6 +87,8 @@ CREATE TABLE IF NOT EXISTS momentum_snapshots (
 CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
 `;
 
+const CHART_DIALECT: ChartDialect = { param: (index) => `?${index}`, sequence: "rowid" };
+
 /** Stores and reads history in a local SQLite file using Node's built-in driver (no dependencies). */
 export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader {
   private readonly db: DatabaseSync;
@@ -144,6 +151,14 @@ export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader {
     );
 
     return { token: toToken(tokenRow), status: screenings[0]?.status ?? "pending", screenings, momentum };
+  }
+
+  async tokenChart(mint: string, intervalSeconds: number, limit: number): Promise<TokenChart | null> {
+    if (this.query("SELECT 1 FROM tokens WHERE mint = ?", mint).length === 0) return null;
+    return {
+      candles: this.query(candlesSql(CHART_DIALECT), mint, intervalSeconds, limit).map(toCandle),
+      devTrades: this.query(devTradesSql(CHART_DIALECT), mint).map(toDevTrade),
+    };
   }
 
   /** Runs a query and returns plain rows; intended for analysis scripts and tests. */

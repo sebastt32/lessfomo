@@ -2,7 +2,13 @@ import type { MomentumSnapshot } from "../../momentum/application/momentum-track
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
-import type { StoredMomentumPoint, StoredScreening, StoredToken } from "../domain/history-reader.js";
+import type {
+  StoredCandle,
+  StoredDevTrade,
+  StoredMomentumPoint,
+  StoredScreening,
+  StoredToken,
+} from "../domain/history-reader.js";
 
 /**
  * Row mapping shared by every SQL adapter, so they all store the same columns in the same
@@ -130,3 +136,74 @@ export const momentumValues = (snapshot: MomentumSnapshot): SqlValue[] => {
 
 export const SCREENINGS_WITH_TOKEN = `
   SELECT s.*, t.symbol, t.name FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint`;
+
+/**
+ * Placeholder for the n-th (1-based) query parameter: `?n` in SQLite, `$n` in PostgreSQL.
+ * `sequence` is the column that reflects insertion order (`rowid` / `ctid`), used to break
+ * ties between trades with the same timestamp.
+ */
+export interface ChartDialect {
+  readonly param: (index: number) => string;
+  readonly sequence: string;
+}
+
+/**
+ * Candles of one token. Parameters: 1 = mint, 2 = interval in seconds, 3 = limit.
+ * Bucket = floor(timestamp_ms / 1000 / interval) * interval (Unix seconds). Open and close are
+ * the first and last trade of the bucket by timestamp, then insertion order. Keeps the most
+ * recent `limit` buckets, returned oldest first. The interval is cast to an integer so both
+ * engines use integer division.
+ */
+export const candlesSql = ({ param, sequence }: ChartDialect): string => {
+  const interval = `CAST(${param(2)} AS INTEGER)`;
+  return `
+  WITH bucketed AS (
+    SELECT timestamp / 1000 / ${interval} * ${interval} AS bucket, timestamp, ${sequence} AS seq,
+           side, sol_amount, price_sol
+    FROM trades WHERE mint = ${param(1)}
+  ),
+  ranked AS (
+    SELECT bucket, side, sol_amount, price_sol,
+           ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY timestamp ASC, seq ASC) AS first_rank,
+           ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY timestamp DESC, seq DESC) AS last_rank
+    FROM bucketed
+  ),
+  recent AS (
+    SELECT bucket,
+           MAX(CASE WHEN first_rank = 1 THEN price_sol END) AS open,
+           MAX(price_sol) AS high,
+           MIN(price_sol) AS low,
+           MAX(CASE WHEN last_rank = 1 THEN price_sol END) AS close,
+           SUM(sol_amount) AS volume_sol,
+           SUM(CASE WHEN side = 'buy' THEN sol_amount ELSE 0 END) AS buy_volume_sol,
+           SUM(CASE WHEN side = 'sell' THEN sol_amount ELSE 0 END) AS sell_volume_sol,
+           COUNT(*) AS trade_count
+    FROM ranked GROUP BY bucket ORDER BY bucket DESC LIMIT ${param(3)}
+  )
+  SELECT * FROM recent ORDER BY bucket ASC`;
+};
+
+/** Trades of one token made by its creator, oldest first. Parameter 1 = mint. */
+export const devTradesSql = ({ param, sequence }: ChartDialect): string => `
+  SELECT t.timestamp, t.side, t.sol_amount
+  FROM trades t JOIN tokens k ON k.mint = t.mint
+  WHERE t.mint = ${param(1)} AND t.trader = k.creator
+  ORDER BY t.timestamp ASC, t.${sequence} ASC`;
+
+export const toCandle = (row: Row): StoredCandle => ({
+  start: new Date(Number(row["bucket"]) * 1000),
+  open: Number(row["open"]),
+  high: Number(row["high"]),
+  low: Number(row["low"]),
+  close: Number(row["close"]),
+  volumeSol: Number(row["volume_sol"]),
+  buyVolumeSol: Number(row["buy_volume_sol"]),
+  sellVolumeSol: Number(row["sell_volume_sol"]),
+  trades: Number(row["trade_count"]),
+});
+
+export const toDevTrade = (row: Row): StoredDevTrade => ({
+  at: toDate(row["timestamp"]),
+  side: row["side"] === "sell" ? "sell" : "buy",
+  solAmount: Number(row["sol_amount"]),
+});

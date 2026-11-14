@@ -4,6 +4,7 @@ import type { HistoryRecorder } from "./history/domain/history-recorder.js";
 import { PostgresHistory } from "./history/infrastructure/postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./history/infrastructure/sqlite/sqlite-history-recorder.js";
 import { LiveFeed, type Mover } from "./live-feed/application/live-feed.js";
+import { SolPricePoller } from "./market-price/infrastructure/sol-price-poller.js";
 import { MomentumTracker } from "./momentum/application/momentum-tracker.js";
 import { SolanaLogsTradeSource } from "./momentum/infrastructure/solana-logs/solana-logs-trade-source.js";
 import { DEFAULT_SAFETY_THRESHOLDS } from "./safety-checks/domain/evaluate-token-safety.js";
@@ -75,6 +76,8 @@ const formatMover = ({ token, status, snapshot }: Mover, rank: number): string =
 
 const startedAt = new Date();
 const feed = new LiveFeed();
+/** SOL/USD from free keyless public APIs, for market caps in USD. */
+const solPrice = new SolPricePoller();
 let opened: Awaited<ReturnType<typeof openHistory>>;
 try {
   opened = await openHistory();
@@ -161,6 +164,7 @@ const startApi = async (): Promise<ApiServer | null> => {
       port,
       feed,
       history: recorder,
+      solPrice,
       corsOrigins,
       startedAt,
       onError: (error) => console.error(`[api] ${errorMessage(error)}`),
@@ -177,13 +181,17 @@ console.log("lessfomo: screening new pump.fun tokens and tracking momentum...");
 console.log(`[history] storing in ${opened.description}`);
 const api = await startApi();
 screener.start();
+solPrice.start();
 tradeSource.start((trade) => {
-  if (tracker.record(trade)) safely("history", () => recorder.recordTrade(trade));
+  if (!tracker.record(trade)) return;
+  safely("history", () => recorder.recordTrade(trade));
+  feed.tradeRecorded(trade);
 });
 const momentumTimer = setInterval(reportMomentum, MOMENTUM_INTERVAL_MS);
 
 const shutdown = async (): Promise<void> => {
   clearInterval(momentumTimer);
+  solPrice.stop();
   tradeSource.stop();
   screener.stop();
   await api?.close();

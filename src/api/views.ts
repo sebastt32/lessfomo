@@ -1,5 +1,12 @@
-import type { StoredMomentumPoint, StoredScreening, StoredToken, TokenHistory } from "../history/domain/history-reader.js";
-import type { LiveEvent, Mover } from "../live-feed/application/live-feed.js";
+import type {
+  StoredCandle,
+  StoredDevTrade,
+  StoredMomentumPoint,
+  StoredScreening,
+  StoredToken,
+  TokenHistory,
+} from "../history/domain/history-reader.js";
+import type { LiveEvent, LiveTrade, Mover } from "../live-feed/application/live-feed.js";
 import type { ScreeningResult } from "../screening/token-screener.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
 
@@ -78,3 +85,35 @@ export const liveEventView = (event: LiveEvent): { name: string; data: unknown }
       return { name: "status", data: { sources: event.sources } };
   }
 };
+
+/** Unix seconds, as used by chart libraries. */
+const unixSeconds = (date: Date): number => Math.floor(date.getTime() / 1000);
+
+export const candleView = (candle: StoredCandle) => ({
+  time: unixSeconds(candle.start),
+  open: candle.open,
+  high: candle.high,
+  low: candle.low,
+  close: candle.close,
+  volumeSol: candle.volumeSol,
+  buyVolumeSol: candle.buyVolumeSol,
+  sellVolumeSol: candle.sellVolumeSol,
+  trades: candle.trades,
+});
+
+export const devTradeView = (trade: StoredDevTrade) => ({
+  time: unixSeconds(trade.at),
+  side: trade.side,
+  solAmount: trade.solAmount,
+});
+
+export const tradeView = ({ trade, isDev }: LiveTrade) => ({
+  signature: trade.signature,
+  trader: trade.trader,
+  side: trade.side,
+  solAmount: trade.solAmount,
+  tokenAmount: trade.tokenAmount,
+  priceSol: trade.priceSol,
+  isDev,
+  time: unixSeconds(trade.timestamp),
+});

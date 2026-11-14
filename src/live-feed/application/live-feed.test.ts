@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { MomentumSnapshot } from "../../momentum/application/momentum-tracker.js";
+import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
-import { LiveFeed, type LiveEvent } from "./live-feed.js";
+import { LiveFeed, type LiveEvent, type LiveTrade } from "./live-feed.js";
 
 const token = (mint: string, detectedAt = new Date("2026-11-13T20:00:00.000Z")): NewToken => ({
   mint,
@@ -139,5 +140,84 @@ describe("LiveFeed", () => {
     feed.momentumUpdated([snapshot("old", 50, AT), snapshot("new", 10, AT)], AT);
 
     expect(feed.getMovers(20).movers.map((m) => m.token.mint)).toEqual(["new"]);
+  });
+
+  describe("trades", () => {
+    const trade = (mint: string, trader = "fan"): Trade => ({
+      signature: `sig-${mint}-${trader}`,
+      mint,
+      trader,
+      side: "buy",
+      solAmount: 0.5,
+      tokenAmount: 1000,
+      priceSol: 0.0005,
+      timestamp: AT,
+    });
+
+    it("delivers each trade only to subscribers of its token, flagging the creator's trades", () => {
+      const feed = new LiveFeed();
+      feed.tokenDetected(token("a"));
+      const forA: LiveTrade[] = [];
+      const forB: LiveTrade[] = [];
+      feed.subscribeTrades("a", (live) => forA.push(live));
+      feed.subscribeTrades("b", (live) => forB.push(live));
+
+      feed.tradeRecorded(trade("a"));
+      feed.tradeRecorded(trade("a", "dev"));
+
+      expect(forA).toEqual([
+        { trade: trade("a"), isDev: false },
+        { trade: trade("a", "dev"), isDev: true },
+      ]);
+      expect(forB).toEqual([]);
+    });
+
+    it("does not flag trades of tokens it has never seen as dev trades", () => {
+      const feed = new LiveFeed();
+      const received: LiveTrade[] = [];
+      feed.subscribeTrades("ghost", (live) => received.push(live));
+
+      feed.tradeRecorded(trade("ghost", "dev"));
+
+      expect(received).toEqual([{ trade: trade("ghost", "dev"), isDev: false }]);
+    });
+
+    it("keeps notifying other trade subscribers when one throws", () => {
+      const feed = new LiveFeed();
+      const received: string[] = [];
+      feed.subscribeTrades("a", () => {
+        throw new Error("broken client");
+      });
+      feed.subscribeTrades("a", (live) => received.push(live.trade.signature));
+
+      feed.tradeRecorded(trade("a"));
+
+      expect(received).toEqual(["sig-a-fan"]);
+    });
+
+    it("stops delivering after unsubscribe and leaves no subscription behind", () => {
+      const feed = new LiveFeed();
+      const received: string[] = [];
+      const first = feed.subscribeTrades("a", (live) => received.push(live.trade.signature));
+      const second = feed.subscribeTrades("a", () => {});
+
+      first();
+      first();
+      feed.tradeRecorded(trade("a"));
+      second();
+
+      expect(received).toEqual([]);
+      expect(feed.tradeSubscriptionCount()).toBe(0);
+    });
+
+    it("does not send trades to general event subscribers", () => {
+      const feed = new LiveFeed();
+      const events: LiveEvent[] = [];
+      feed.subscribe((event) => events.push(event));
+
+      feed.tradeRecorded(trade("a"));
+
+      expect(events).toEqual([]);
+    });
   });
 });
