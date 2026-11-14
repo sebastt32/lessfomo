@@ -1,4 +1,4 @@
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HistoryReader, StoredScreening, TokenHistory } from "../../history/domain/history-reader.js";
 import { LiveFeed } from "../../live-feed/application/live-feed.js";
@@ -221,6 +221,49 @@ describe("API server", () => {
 
     expect(response.status).toBe(400);
     expect((await response.json()).error.code).toBe("INVALID_MINT");
+  });
+
+  it("answers 400 INVALID_MINT for a mint with broken percent-encoding", async () => {
+    const { base } = await start();
+
+    for (const path of ["/api/tokens/%", "/api/tokens/%E0%A4%A"]) {
+      const response = await fetch(`${base}${path}`);
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe("INVALID_MINT");
+    }
+  });
+
+  it("answers 400 BAD_REQUEST for a request target that is not a valid URL", async () => {
+    const { base } = await start();
+    const { port } = new URL(base);
+
+    const statusLine = await new Promise<string>((resolve, reject) => {
+      const socket = connect(Number(port), "127.0.0.1", () => {
+        socket.write("GET http://[::1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+      });
+      let raw = "";
+      socket.on("data", (chunk) => (raw += chunk.toString()));
+      socket.on("end", () => resolve(raw.split("\r\n")[0] ?? ""));
+      socket.on("error", reject);
+    });
+
+    expect(statusLine).toBe("HTTP/1.1 400 Bad Request");
+  });
+
+  it("closes cleanly even if events arrive while streams are closing", async () => {
+    const { feed, base } = await start({ heartbeatMs: 1 });
+    const response = await fetch(`${base}/api/stream`);
+    const reader = response.body!.getReader();
+    await reader.read();
+
+    const closing = server!.close();
+    feed.tokenDetected(token);
+    feed.sourceStatusChanged("solanaLogs", "connected");
+    await closing;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    server = null;
+
+    expect(() => feed.tokenDetected(token)).not.toThrow();
   });
 
   it("answers 404 NOT_FOUND for unknown routes and 405 for other methods", async () => {

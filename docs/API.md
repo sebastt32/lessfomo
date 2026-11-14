@@ -15,6 +15,8 @@ Conventions:
 - Percentages go from 0 to 100; components go from 0 to 1.
 - Errors use `{ "error": { "code": string, "message": string } }` with a matching HTTP status.
 - `limit` query parameters are clamped to `1..100`; invalid values fall back to the default.
+- Generic errors: `404 NOT_FOUND` (unknown route), `405 METHOD_NOT_ALLOWED` (anything but `GET`/`OPTIONS`),
+  `400 BAD_REQUEST` (unparseable request target), `500 INTERNAL_ERROR` (never includes internal details).
 
 ## Types
 

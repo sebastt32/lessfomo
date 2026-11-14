@@ -43,14 +43,24 @@ const sendError = (response: ServerResponse, status: number, code: string, messa
   sendJson(response, status, { error: { code, message } });
 
 const writeEvent = (response: ServerResponse, event: { name: string; data: unknown }): void => {
-  response.write(`event: ${event.name}\ndata: ${JSON.stringify(event.data)}\n\n`);
+  if (!response.writableEnded) response.write(`event: ${event.name}\ndata: ${JSON.stringify(event.data)}\n\n`);
+};
+
+/** Returns null instead of throwing on malformed percent-encoding. */
+const safeDecode = (value: string): string | null => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 };
 
 /** Starts the read-only HTTP + SSE API described in docs/API.md. */
 export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> => {
   const { feed, history, corsOrigins, startedAt } = options;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
-  const streams = new Set<ServerResponse>();
+  /** Open SSE responses and the function that detaches each one from the feed. */
+  const streams = new Map<ServerResponse, () => void>();
 
   const applyCors = (request: IncomingMessage, response: ServerResponse): void => {
     const origin = request.headers.origin;
@@ -69,21 +79,28 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
     response.write("retry: 5000\n\n");
     writeEvent(response, { name: "status", data: { sources: feed.getSources() } });
 
-    streams.add(response);
     const unsubscribe = feed.subscribe((event) => writeEvent(response, liveEventView(event)));
-    const heartbeat = setInterval(() => response.write(": ping\n\n"), heartbeatMs);
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded) response.write(": ping\n\n");
+    }, heartbeatMs);
 
     const cleanup = (): void => {
       clearInterval(heartbeat);
       unsubscribe();
       streams.delete(response);
     };
+    streams.set(response, cleanup);
     request.on("close", cleanup);
     response.on("close", cleanup);
   };
 
   const route = (request: IncomingMessage, response: ServerResponse): void => {
-    const url = new URL(request.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      return sendError(response, 400, "BAD_REQUEST", "Request target is not a valid URL");
+    }
     const path = url.pathname;
 
     if (path === "/api/health") {
@@ -98,8 +115,8 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
       return sendJson(response, 200, { screenings: history.recentScreenings(limit).map(storedScreeningView) });
     }
     if (path.startsWith("/api/tokens/")) {
-      const mint = decodeURIComponent(path.slice("/api/tokens/".length));
-      if (!BASE58_MINT.test(mint)) return sendError(response, 400, "INVALID_MINT", "Mint is not a base58 address");
+      const mint = safeDecode(path.slice("/api/tokens/".length));
+      if (mint === null || !BASE58_MINT.test(mint)) return sendError(response, 400, "INVALID_MINT", "Mint is not a base58 address");
       const tokenHistory = history.tokenHistory(mint);
       if (tokenHistory === null) return sendError(response, 404, "TOKEN_NOT_FOUND", "Token was never seen");
       return sendJson(response, 200, tokenHistoryView(tokenHistory));
@@ -143,7 +160,10 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
         streamCount: () => streams.size,
         close: () =>
           new Promise<void>((done) => {
-            for (const stream of streams) stream.end();
+            for (const [stream, cleanup] of [...streams]) {
+              cleanup();
+              stream.end();
+            }
             server.close(() => done());
             server.closeAllConnections();
           }),
