@@ -99,6 +99,33 @@ describe("evaluateTokenSafety", () => {
       "MINT_AUTHORITY_ACTIVE",
       "FREEZE_AUTHORITY_ACTIVE",
       "CREATOR_HOLDS_TOO_MUCH",
+      "NOT_ENOUGH_HOLDERS",
     ]);
+  });
+
+  it("fails when the token has fewer holders than the minimum", () => {
+    const snapshot = safeSnapshot();
+    const unsafe = { ...snapshot, distribution: { ...snapshot.distribution, totalHolders: 19 } };
+
+    const report = evaluateTokenSafety(unsafe, DEFAULT_SAFETY_THRESHOLDS);
+
+    expect(report.passed).toBe(false);
+    expect(report.failures).toEqual([
+      { code: "NOT_ENOUGH_HOLDERS", detail: "Only 19 holder(s) (min 20)" },
+    ]);
+  });
+
+  it("fails a token with no holders at all", () => {
+    const snapshot = safeSnapshot();
+    const empty = { ...snapshot, distribution: { ...snapshot.distribution, holders: [], totalHolders: 0 } };
+
+    expect(codesOf(empty)).toEqual(["NOT_ENOUGH_HOLDERS"]);
+  });
+
+  it("passes a token with exactly the minimum number of holders", () => {
+    const snapshot = safeSnapshot();
+    const atMinimum = { ...snapshot, distribution: { ...snapshot.distribution, totalHolders: 20 } };
+
+    expect(codesOf(atMinimum)).toEqual([]);
   });
 });

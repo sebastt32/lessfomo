@@ -51,6 +51,7 @@ Only free, keyless data sources are used:
 | `TOP_HOLDERS_CONCENTRATED` | Top 10 wallets hold more than 30% |
 | `CREATOR_HOLDS_TOO_MUCH` | Creator holds more than 10% |
 | `INSIDER_NETWORK_DETECTED` | Connected insider wallets are detected |
+| `NOT_ENOUGH_HOLDERS` | Fewer than 20 holders |
 
 If a data source fails or has no data, the token is reported as `UNVERIFIED`, never as passed.
 

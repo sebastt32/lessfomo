@@ -6,7 +6,8 @@ export type SafetyFailureCode =
   | "DANGEROUS_EXTENSION"
   | "TOP_HOLDERS_CONCENTRATED"
   | "CREATOR_HOLDS_TOO_MUCH"
-  | "INSIDER_NETWORK_DETECTED";
+  | "INSIDER_NETWORK_DETECTED"
+  | "NOT_ENOUGH_HOLDERS";
 
 export interface SafetyFailure {
   readonly code: SafetyFailureCode;
@@ -19,12 +20,15 @@ export interface SafetyThresholds {
   /** Maximum share of supply the creator may hold, from 0 to 100. */
   readonly maxCreatorPct: number;
   readonly maxInsiderNetworks: number;
+  /** Minimum number of holders; fewer means there is not enough real interest to judge. */
+  readonly minHolders: number;
 }
 
 export const DEFAULT_SAFETY_THRESHOLDS: SafetyThresholds = {
   maxTop10Pct: 30,
   maxCreatorPct: 10,
   maxInsiderNetworks: 0,
+  minHolders: 20,
 };
 
 export interface SafetyReport {
@@ -89,6 +93,12 @@ export const evaluateTokenSafety = (
     failures.push({
       code: "INSIDER_NETWORK_DETECTED",
       detail: `${distribution.insiderNetworks} insider network(s) detected (max ${thresholds.maxInsiderNetworks})`,
+    });
+  }
+  if (distribution.totalHolders < thresholds.minHolders) {
+    failures.push({
+      code: "NOT_ENOUGH_HOLDERS",
+      detail: `Only ${distribution.totalHolders} holder(s) (min ${thresholds.minHolders})`,
     });
   }
 
