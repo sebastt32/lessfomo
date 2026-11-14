@@ -127,7 +127,15 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
 
   /** Connects and creates the schema if it does not exist yet. Rejects if the server is unreachable. */
   static async connect(connectionString: string, options: PostgresHistoryOptions = {}): Promise<PostgresHistory> {
-    const pool = new pg.Pool({ connectionString });
+    // Bounded waits: a database that drops packets must not hang API requests or pile up writes.
+    const pool = new pg.Pool({
+      connectionString,
+      max: 10,
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 30_000,
+      statement_timeout: 15_000,
+      query_timeout: 20_000,
+    });
     pool.on("error", (error) => options.onError?.(error));
     try {
       const client = await pool.connect();
