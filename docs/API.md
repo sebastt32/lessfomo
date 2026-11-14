@@ -84,7 +84,40 @@ interface MomentumPoint {
 }
 
 type SourceStatus = "connecting" | "connected" | "disconnected";
+
+type CandleInterval = "1s" | "1m" | "5m";
+
+interface Candle {
+  time: number;                   // bucket start, Unix seconds (UTC)
+  open: number;                   // prices in SOL per token
+  high: number;
+  low: number;
+  close: number;
+  volumeSol: number;
+  buyVolumeSol: number;
+  sellVolumeSol: number;
+  trades: number;
+}
+
+interface DevTrade {
+  time: number;                   // Unix seconds
+  side: "buy" | "sell";
+  solAmount: number;
+}
+
+interface TradeView {
+  signature: string;
+  trader: string;
+  side: "buy" | "sell";
+  solAmount: number;
+  tokenAmount: number;
+  priceSol: number;
+  isDev: boolean;                 // trader is the token creator
+  time: number;                   // Unix seconds
+}
 ```
+
+Market cap is derived on the client: `priceSol × totalSupply`, and in USD `× solUsd`.
 
 ## Endpoints
 
@@ -120,6 +153,32 @@ mint is not a base58 address.
 ```json
 { "token": TokenView, "status": "passed", "screenings": [ScreeningView], "momentum": [MomentumPoint] }
 ```
+
+### `GET /api/tokens/:mint/candles?interval=1m&limit=300`
+
+OHLCV candles built from every stored trade of the token, oldest first. Buckets without
+trades are omitted. `interval` defaults to `1m`; any other value than `1s`, `1m`, `5m` →
+`400 INVALID_INTERVAL`. `limit` keeps the most recent N candles, default `300`, clamped to `1..1000`.
+Same `INVALID_MINT` / `TOKEN_NOT_FOUND` errors as `/api/tokens/:mint`.
+
+```json
+{ "mint": string, "interval": "1m", "totalSupply": 1000000000, "solUsd": 142.31 | null,
+  "candles": [Candle], "devTrades": [DevTrade] }
+```
+
+`solUsd` is the latest SOL/USD price from a free public source, or `null` if unavailable.
+
+### `GET /api/tokens/:mint/stream`
+
+Server-Sent Events for one token only. Same `INVALID_MINT` (400) error; an unknown but
+valid mint is accepted (the token may appear later).
+
+| Event | `data` | When |
+| --- | --- | --- |
+| `trade` | `TradeView` | Every trade of this token, as it happens |
+| `sol-price` | `{ "solUsd": number }` | Once right after connecting (if known), then whenever it changes |
+
+Heartbeat `: ping` every 15 seconds, like `/api/stream`.
 
 ### `GET /api/stream`
 
