@@ -129,6 +129,6 @@ Every event's `data` is JSON.
 | `token` | `TokenView` | A new token is detected |
 | `screening` | `ScreeningView` | A safety check finishes |
 | `momentum` | `{ "at": string, "movers": Mover[] }` (top 20) | Every minute |
-| `status` | `{ "sources": { "pumpportal": SourceStatus, "solanaLogs": SourceStatus } }` | A data source connects or disconnects |
+| `status` | `{ "sources": { "pumpportal": SourceStatus, "solanaLogs": SourceStatus } }` | Once right after connecting, then whenever a data source connects or disconnects |
 
 A comment line (`: ping`) is sent every 15 seconds to keep the connection open.
