@@ -9,3 +9,6 @@ coverage/
 
 # Local ODD tracking
 odd/
+
+# Local history database
+data/

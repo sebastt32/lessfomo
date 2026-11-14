@@ -1,7 +1,10 @@
 # lessfomo
 
-Real-time memecoin screener for Solana. It detects new tokens, enriches them with
-on-chain and market data, and discards the ones that fail basic safety checks.
+Real-time memecoin screener for Solana. It detects new pump.fun tokens, discards the
+ones that fail basic safety checks, scores their on-chain buying momentum, and stores
+everything locally so the momentum hypothesis can be validated later.
+
+It only uses free, keyless data sources.
 
 ## Requirements
 
@@ -32,6 +35,9 @@ All variables are optional.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC used to read mint authorities |
+| `SOLANA_WS_URL` | `wss://api.mainnet-beta.solana.com` | Solana RPC WebSocket used to stream pump.fun trades |
+| `LESSFOMO_DB_PATH` | `data/lessfomo.db` | SQLite file where history is stored |
+| `TRACKING_WINDOW_MS` | `3600000` | How long each new token is followed for momentum |
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
@@ -55,16 +61,55 @@ Only free, keyless data sources are used:
 
 If a data source fails or has no data, the token is reported as `UNVERIFIED`, never as passed.
 
+## Momentum score
+
+Trades come from the public Solana RPC (`logsSubscribe` on the pump.fun program); the
+`TradeEvent` emitted by pump.fun is decoded directly from the logs. Every new token is
+followed for `TRACKING_WINDOW_MS`, and its momentum is computed every minute from the
+last five minutes of trades. The creator's own trades are excluded.
+
+| Component | Meaning |
+| --- | --- |
+| Activity | Unique buyers in the last 5 minutes, full at 50 |
+| Acceleration | Unique buyers in the last minute versus the average of the 4 minutes before |
+| Buy pressure | How much bought SOL volume exceeds sold volume |
+
+```
+score = 100 × activity × (0.40 + 0.35 × acceleration + 0.25 × buy pressure)
+```
+
+Activity multiplies everything, so a handful of wallets can never reach a high score.
+
+> Score v1 is a hypothesis, not a proven model. Validate it with the stored data before trusting it.
+
+## History
+
+Everything is stored in a local SQLite file (Node's built-in `node:sqlite`, no extra
+dependencies). Timestamps are Unix epoch milliseconds.
+
+| Table | Contents |
+| --- | --- |
+| `tokens` | Every detected token |
+| `screenings` | Each safety check result, failure codes and holder metrics |
+| `trades` | Every trade of a tracked token |
+| `momentum_snapshots` | Score, components and metrics per token per minute (active tokens only) |
+
+Example: did tokens that scored 60+ go up over the next 15 minutes?
+
+```sql
+SELECT s.mint, s.at, s.score, s.last_price_sol,
+       (SELECT MAX(t.price_sol) FROM trades t
+         WHERE t.mint = s.mint AND t.timestamp BETWEEN s.at AND s.at + 900000) AS max_price_next_15m
+FROM momentum_snapshots s
+WHERE s.score >= 60;
+```
+
 ## Pipeline
 
 ```
-New token detector (WebSocket)
-        ↓
-Enrichment (RPC + RugCheck + DexScreener)
-        ↓
-Rules engine → score (discard on any failed safety check)
-        ↓
-Storage + real-time dashboard / alerts
+PumpPortal (new tokens) ──┬─→ safety checks (Solana RPC + RugCheck) ─┐
+                          │                                         ├─→ console + SQLite history
+Solana RPC logs (trades) ─┴─→ momentum tracker (every minute) ──────┘
 ```
 
 > Passing the filters does not make a token profitable. It only removes obvious scams.
