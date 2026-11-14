@@ -38,6 +38,9 @@ All variables are optional.
 | `SOLANA_WS_URL` | `wss://api.mainnet-beta.solana.com` | Solana RPC WebSocket used to stream pump.fun trades |
 | `LESSFOMO_DB_PATH` | `data/lessfomo.db` | SQLite file where history is stored |
 | `TRACKING_WINDOW_MS` | `3600000` | How long each new token is followed for momentum |
+| `API_HOST` | `127.0.0.1` | Interface the HTTP API binds to (local only by default) |
+| `API_PORT` | `3001` | HTTP API port |
+| `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated browser origins allowed to call the API |
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
@@ -104,12 +107,29 @@ FROM momentum_snapshots s
 WHERE s.score >= 60;
 ```
 
+## HTTP API
+
+While running, the screener exposes a read-only JSON + Server-Sent Events API on
+`http://127.0.0.1:3001` for dashboards such as
+[lessfomo-frontend](https://github.com/sebastt32/lessfomo-frontend).
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/health` | Status and data source health |
+| `GET /api/movers` | Latest momentum ranking |
+| `GET /api/screenings` | Recent safety check results |
+| `GET /api/tokens/:mint` | Full history of one token |
+| `GET /api/stream` | Live `token`, `screening`, `momentum` and `status` events |
+
+The full contract is in [docs/API.md](docs/API.md).
+
 ## Pipeline
 
 ```
 PumpPortal (new tokens) ──┬─→ safety checks (Solana RPC + RugCheck) ─┐
                           │                                         ├─→ console + SQLite history
-Solana RPC logs (trades) ─┴─→ momentum tracker (every minute) ──────┘
+Solana RPC logs (trades) ─┴─→ momentum tracker (every minute) ──────┤
+                                                                    └─→ live feed → HTTP + SSE API
 ```
 
 > Passing the filters does not make a token profitable. It only removes obvious scams.

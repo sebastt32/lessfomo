@@ -1,11 +1,12 @@
+import { startApiServer, type ApiServer } from "./api/http/api-server.js";
 import { SqliteHistoryRecorder } from "./history/infrastructure/sqlite/sqlite-history-recorder.js";
-import { MomentumTracker, type MomentumSnapshot } from "./momentum/application/momentum-tracker.js";
+import { LiveFeed, type Mover } from "./live-feed/application/live-feed.js";
+import { MomentumTracker } from "./momentum/application/momentum-tracker.js";
 import { SolanaLogsTradeSource } from "./momentum/infrastructure/solana-logs/solana-logs-trade-source.js";
 import { DEFAULT_SAFETY_THRESHOLDS } from "./safety-checks/domain/evaluate-token-safety.js";
 import { RugCheckHolderDistributionReader } from "./safety-checks/infrastructure/rugcheck/rugcheck-holder-distribution-reader.js";
 import { SolanaRpcMintAuthorityReader } from "./safety-checks/infrastructure/solana-rpc/solana-rpc-mint-authority-reader.js";
 import { TokenScreener, type ScreeningResult } from "./screening/token-screener.js";
-import type { NewToken } from "./token-discovery/domain/new-token.js";
 import type { NewTokenSource } from "./token-discovery/domain/new-token-source.js";
 import { PumpPortalNewTokenSource } from "./token-discovery/infrastructure/pumpportal/pumpportal-new-token-source.js";
 
@@ -39,38 +40,34 @@ const formatScreening = (result: ScreeningResult): string => {
   return `✗  FAILED     ${label}  ${stats}  [${failures.map((f) => f.code).join(", ")}]`;
 };
 
-interface TokenInfo {
-  readonly token: NewToken;
-  status: ScreeningResult["status"] | "pending";
-}
-
-const tokens = new Map<string, TokenInfo>();
-const recorder = new SqliteHistoryRecorder(process.env["LESSFOMO_DB_PATH"] || "data/lessfomo.db");
-const tracker = new MomentumTracker({ trackingWindowMs: TRACKING_WINDOW_MS });
-
-const formatMover = (snapshot: MomentumSnapshot, rank: number): string => {
-  const info = tokens.get(snapshot.mint);
+const formatMover = ({ token, status, snapshot }: Mover, rank: number): string => {
   const { score, components, metrics } = snapshot.momentum;
-  const symbol = (info?.token.symbol ?? "?").padEnd(12);
-  const status = (info?.status ?? "pending").toUpperCase();
   const priceChange = `${metrics.priceChange5mPct >= 0 ? "+" : ""}${metrics.priceChange5mPct}%`;
   return (
-    `  ${rank}. ${symbol} score=${String(score).padStart(3)}  buyers1m=${metrics.uniqueBuyers1m} ` +
+    `  ${rank}. ${token.symbol.padEnd(12)} score=${String(score).padStart(3)}  buyers1m=${metrics.uniqueBuyers1m} ` +
     `buyers5m=${metrics.uniqueBuyers5m} accel=${components.acceleration} pressure=${components.buyPressure} ` +
-    `Δprice5m=${priceChange}  [${status}] ${snapshot.mint}`
+    `Δprice5m=${priceChange}  [${status.toUpperCase()}] ${token.mint}`
   );
 };
 
-/** Feeds every new token to the history and the momentum tracker before screening it. */
+const startedAt = new Date();
+const feed = new LiveFeed();
+const recorder = new SqliteHistoryRecorder(process.env["LESSFOMO_DB_PATH"] || "data/lessfomo.db");
+const tracker = new MomentumTracker({ trackingWindowMs: TRACKING_WINDOW_MS });
+
+/** Feeds every new token to the live feed, the history and the momentum tracker before screening it. */
 const pumpPortal = new PumpPortalNewTokenSource({
-  onStatus: (status) => console.log(`[pumpportal] ${status}`),
+  onStatus: (status) => {
+    console.log(`[pumpportal] ${status}`);
+    feed.sourceStatusFromSocket("pumpportal", status);
+  },
 });
 const tokenSource: NewTokenSource = {
   start: (onToken) =>
     pumpPortal.start((token) => {
-      tokens.set(token.mint, { token, status: "pending" });
       tracker.track(token, token.detectedAt);
       safely("history", () => recorder.recordToken(token));
+      feed.tokenDetected(token);
       onToken(token);
     }),
   stop: () => pumpPortal.stop(),
@@ -86,9 +83,9 @@ const screener = new TokenScreener({
   minIntervalMs: readNumberEnv("MIN_INTERVAL_MS", 4_000),
   maxPending: readNumberEnv("MAX_PENDING", 50),
   onResult: (result) => {
-    const info = tokens.get(result.token.mint);
-    if (info !== undefined) info.status = result.status;
-    safely("history", () => recorder.recordScreening(result, new Date()));
+    const evaluatedAt = new Date();
+    safely("history", () => recorder.recordScreening(result, evaluatedAt));
+    feed.screeningFinished(result, evaluatedAt);
     console.log(formatScreening(result));
   },
   onSkip: () => {
@@ -98,19 +95,18 @@ const screener = new TokenScreener({
 
 const tradeSource = new SolanaLogsTradeSource({
   ...(process.env["SOLANA_WS_URL"] && { url: process.env["SOLANA_WS_URL"] }),
-  onStatus: (status) => console.log(`[solana-logs] ${status}`),
+  onStatus: (status) => {
+    console.log(`[solana-logs] ${status}`);
+    feed.sourceStatusFromSocket("solanaLogs", status);
+  },
 });
 
 const reportMomentum = (): void => {
   const now = new Date();
   const snapshots = tracker.snapshot(now).filter((s) => s.momentum.metrics.tradeCount5m > 0);
   for (const snapshot of snapshots) safely("history", () => recorder.recordMomentum(snapshot));
-
-  for (const [mint, info] of tokens) {
-    if (now.getTime() - info.token.detectedAt.getTime() > TRACKING_WINDOW_MS + EVALUATION_DELAY_MS) {
-      tokens.delete(mint);
-    }
-  }
+  feed.prune(now, TRACKING_WINDOW_MS + EVALUATION_DELAY_MS);
+  feed.momentumUpdated(snapshots, now);
 
   console.log(
     `[momentum] tracking ${tracker.trackedCount()} token(s), ${tracker.bufferedTradeCount()} trade(s) buffered, ${snapshots.length} active`,
@@ -119,26 +115,50 @@ const reportMomentum = (): void => {
     console.log(`[screener] skipped ${skipped} token(s) in the last minute to respect free rate limits`);
     skipped = 0;
   }
-  [...snapshots]
-    .sort((a, b) => b.momentum.score - a.momentum.score)
-    .slice(0, TOP_MOVERS)
-    .forEach((snapshot, index) => console.log(formatMover(snapshot, index + 1)));
+  feed.getMovers(TOP_MOVERS).movers.forEach((mover, index) => console.log(formatMover(mover, index + 1)));
+};
+
+const startApi = async (): Promise<ApiServer | null> => {
+  const host = process.env["API_HOST"] || "127.0.0.1";
+  const port = readNumberEnv("API_PORT", 3001);
+  const corsOrigins = (process.env["CORS_ORIGIN"] || "http://localhost:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+  try {
+    const api = await startApiServer({
+      host,
+      port,
+      feed,
+      history: recorder,
+      corsOrigins,
+      startedAt,
+      onError: (error) => console.error(`[api] ${error instanceof Error ? error.message : String(error)}`),
+    });
+    console.log(`[api] listening on http://${host}:${port} (CORS: ${corsOrigins.join(", ")})`);
+    return api;
+  } catch (error) {
+    console.error(`[api] could not start: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 };
 
 console.log("lessfomo: screening new pump.fun tokens and tracking momentum...");
+const api = await startApi();
 screener.start();
 tradeSource.start((trade) => {
   if (tracker.record(trade)) safely("history", () => recorder.recordTrade(trade));
 });
 const momentumTimer = setInterval(reportMomentum, MOMENTUM_INTERVAL_MS);
 
-const shutdown = (): void => {
+const shutdown = async (): Promise<void> => {
   clearInterval(momentumTimer);
   tradeSource.stop();
   screener.stop();
+  await api?.close();
   recorder.close();
   process.exit(0);
 };
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());
