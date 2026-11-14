@@ -132,6 +132,23 @@ describe("computeMomentum", () => {
     expect(metrics.lastPriceSol).toBe(1.5);
   });
 
+  it("keeps the score low when only a few wallets buy, even with full acceleration and pressure", () => {
+    const trades = [trade("a", "buy", 0.1, 30), trade("b", "buy", 0.1, 20)];
+
+    const result = computeMomentum(trades, NOW);
+
+    // activity = 2/50 = 0.04 scales everything: 0.04 * (0.4 + 0.35 * 1 + 0.25 * 1) * 100 = 4
+    expect(result.components).toEqual({ activity: 0.04, acceleration: 1, buyPressure: 1 });
+    expect(result.score).toBe(4);
+  });
+
+  it("scales acceleration and pressure by activity", () => {
+    const trades = [...buyers(25, 30, "now-")];
+
+    // activity = 0.5, acceleration = 1, buyPressure = 1 → 0.5 * 1 * 100 = 50
+    expect(computeMomentum(trades, NOW).score).toBe(50);
+  });
+
   it("combines components into a 0-100 score with fixed weights", () => {
     const trades = [...buyers(2, 90, "prev-"), ...buyers(48, 30, "now-")];
 

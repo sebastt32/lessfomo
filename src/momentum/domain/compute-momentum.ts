@@ -10,6 +10,8 @@ const MIN_ACCELERATION_BASE = 2;
 /**
  * Score v1 weights. This is a hypothesis, not a proven model:
  * stored snapshots exist precisely to validate or tune it later.
+ * Activity also multiplies the whole score, so a few wallets can never
+ * produce a high score through acceleration or pressure alone.
  */
 export const MOMENTUM_WEIGHTS = { activity: 0.4, acceleration: 0.35, buyPressure: 0.25 } as const;
 
@@ -102,12 +104,11 @@ export const computeMomentum = (trades: readonly Trade[], now: Date, options: Mo
     buyPressure: totalVolume > 0 ? round(clamp01((buyVolume / totalVolume - 0.5) * 2), 4) : 0,
   };
 
-  const score = Math.round(
-    100 *
-      (MOMENTUM_WEIGHTS.activity * components.activity +
-        MOMENTUM_WEIGHTS.acceleration * components.acceleration +
-        MOMENTUM_WEIGHTS.buyPressure * components.buyPressure),
-  );
+  const weighted =
+    MOMENTUM_WEIGHTS.activity +
+    MOMENTUM_WEIGHTS.acceleration * components.acceleration +
+    MOMENTUM_WEIGHTS.buyPressure * components.buyPressure;
+  const score = Math.round(100 * components.activity * weighted);
 
   return {
     score,
