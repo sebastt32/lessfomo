@@ -94,7 +94,7 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
     response.on("close", cleanup);
   };
 
-  const route = (request: IncomingMessage, response: ServerResponse): void => {
+  const route = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let url: URL;
     try {
       url = new URL(request.url ?? "/", "http://localhost");
@@ -112,12 +112,13 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
     }
     if (path === "/api/screenings") {
       const limit = parseLimit(url.searchParams.get("limit"), DEFAULT_SCREENINGS_LIMIT);
-      return sendJson(response, 200, { screenings: history.recentScreenings(limit).map(storedScreeningView) });
+      const screenings = await history.recentScreenings(limit);
+      return sendJson(response, 200, { screenings: screenings.map(storedScreeningView) });
     }
     if (path.startsWith("/api/tokens/")) {
       const mint = safeDecode(path.slice("/api/tokens/".length));
       if (mint === null || !BASE58_MINT.test(mint)) return sendError(response, 400, "INVALID_MINT", "Mint is not a base58 address");
-      const tokenHistory = history.tokenHistory(mint);
+      const tokenHistory = await history.tokenHistory(mint);
       if (tokenHistory === null) return sendError(response, 404, "TOKEN_NOT_FOUND", "Token was never seen");
       return sendJson(response, 200, tokenHistoryView(tokenHistory));
     }
@@ -142,13 +143,11 @@ export const startApiServer = (options: ApiServerOptions): Promise<ApiServer> =>
       return;
     }
 
-    try {
-      route(request, response);
-    } catch (error) {
+    route(request, response).catch((error: unknown) => {
       options.onError?.(error);
       if (!response.headersSent) sendError(response, 500, "INTERNAL_ERROR", "Unexpected server error");
       else response.end();
-    }
+    });
   });
 
   return new Promise((resolve, reject) => {

@@ -1,4 +1,7 @@
 import { startApiServer, type ApiServer } from "./api/http/api-server.js";
+import type { HistoryReader } from "./history/domain/history-reader.js";
+import type { HistoryRecorder } from "./history/domain/history-recorder.js";
+import { PostgresHistory } from "./history/infrastructure/postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./history/infrastructure/sqlite/sqlite-history-recorder.js";
 import { LiveFeed, type Mover } from "./live-feed/application/live-feed.js";
 import { MomentumTracker } from "./momentum/application/momentum-tracker.js";
@@ -20,13 +23,33 @@ const TRACKING_WINDOW_MS = readNumberEnv("TRACKING_WINDOW_MS", 60 * 60_000);
 const MOMENTUM_INTERVAL_MS = 60_000;
 const TOP_MOVERS = 5;
 
-/** Runs a side effect without letting a storage error take down the live streams. */
-const safely = (label: string, action: () => void): void => {
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** Fires a storage write without waiting for it, so a storage error never blocks or takes down the live streams. */
+const safely = (label: string, action: () => Promise<void>): void => {
+  const report = (error: unknown): void => console.error(`[${label}] ${errorMessage(error)}`);
   try {
-    action();
+    action().catch(report);
   } catch (error) {
-    console.error(`[${label}] ${error instanceof Error ? error.message : String(error)}`);
+    report(error);
   }
+};
+
+interface History extends HistoryRecorder, HistoryReader {
+  close(): Promise<void>;
+}
+
+/** PostgreSQL when DATABASE_URL is set, otherwise a local SQLite file. Never logs the connection string. */
+const openHistory = async (): Promise<{ history: History; description: string }> => {
+  const databaseUrl = process.env["DATABASE_URL"];
+  if (databaseUrl) {
+    const history = await PostgresHistory.connect(databaseUrl, {
+      onError: (error) => console.error(`[history] ${errorMessage(error)}`),
+    });
+    return { history, description: "PostgreSQL (DATABASE_URL)" };
+  }
+  const path = process.env["LESSFOMO_DB_PATH"] || "data/lessfomo.db";
+  return { history: new SqliteHistoryRecorder(path), description: `SQLite (${path})` };
 };
 
 const formatScreening = (result: ScreeningResult): string => {
@@ -52,7 +75,14 @@ const formatMover = ({ token, status, snapshot }: Mover, rank: number): string =
 
 const startedAt = new Date();
 const feed = new LiveFeed();
-const recorder = new SqliteHistoryRecorder(process.env["LESSFOMO_DB_PATH"] || "data/lessfomo.db");
+let opened: Awaited<ReturnType<typeof openHistory>>;
+try {
+  opened = await openHistory();
+} catch (error) {
+  console.error(`[history] could not open the history store: ${errorMessage(error)}`);
+  process.exit(1);
+}
+const recorder = opened.history;
 const tracker = new MomentumTracker({ trackingWindowMs: TRACKING_WINDOW_MS });
 
 /** Feeds every new token to the live feed, the history and the momentum tracker before screening it. */
@@ -133,17 +163,18 @@ const startApi = async (): Promise<ApiServer | null> => {
       history: recorder,
       corsOrigins,
       startedAt,
-      onError: (error) => console.error(`[api] ${error instanceof Error ? error.message : String(error)}`),
+      onError: (error) => console.error(`[api] ${errorMessage(error)}`),
     });
     console.log(`[api] listening on http://${host}:${port} (CORS: ${corsOrigins.join(", ")})`);
     return api;
   } catch (error) {
-    console.error(`[api] could not start: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`[api] could not start: ${errorMessage(error)}`);
     return null;
   }
 };
 
 console.log("lessfomo: screening new pump.fun tokens and tracking momentum...");
+console.log(`[history] storing in ${opened.description}`);
 const api = await startApi();
 screener.start();
 tradeSource.start((trade) => {
@@ -156,7 +187,7 @@ const shutdown = async (): Promise<void> => {
   tradeSource.stop();
   screener.stop();
   await api?.close();
-  recorder.close();
+  await recorder.close().catch((error: unknown) => console.error(`[history] ${errorMessage(error)}`));
   process.exit(0);
 };
 

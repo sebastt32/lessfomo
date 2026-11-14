@@ -67,9 +67,9 @@ afterEach(() => {
 });
 
 describe("SqliteHistoryRecorder", () => {
-  it("stores new tokens", () => {
+  it("stores new tokens", async () => {
     const recorder = new SqliteHistoryRecorder(":memory:");
-    recorder.recordToken(token);
+    await recorder.recordToken(token);
 
     expect(recorder.query("SELECT * FROM tokens")).toEqual([
       {
@@ -87,7 +87,7 @@ describe("SqliteHistoryRecorder", () => {
     ]);
   });
 
-  it("stores screening results, including failures and unverified reasons", () => {
+  it("stores screening results, including failures and unverified reasons", async () => {
     const recorder = new SqliteHistoryRecorder(":memory:");
     const at = new Date("2026-11-13T20:01:00.000Z");
     const failed: ScreeningResult = {
@@ -101,8 +101,8 @@ describe("SqliteHistoryRecorder", () => {
     };
     const unverified: ScreeningResult = { token, status: "unverified", reason: "RugCheck responded 429" };
 
-    recorder.recordScreening(failed, at);
-    recorder.recordScreening(unverified, at);
+    await recorder.recordScreening(failed, at);
+    await recorder.recordScreening(unverified, at);
 
     expect(recorder.query("SELECT * FROM screenings ORDER BY id")).toEqual([
       {
@@ -130,11 +130,11 @@ describe("SqliteHistoryRecorder", () => {
     ]);
   });
 
-  it("stores trades once, ignoring duplicates", () => {
+  it("stores trades once, ignoring duplicates", async () => {
     const recorder = new SqliteHistoryRecorder(":memory:");
 
-    recorder.recordTrade(trade);
-    recorder.recordTrade(trade);
+    await recorder.recordTrade(trade);
+    await recorder.recordTrade(trade);
 
     expect(recorder.query("SELECT * FROM trades")).toEqual([
       {
@@ -150,10 +150,10 @@ describe("SqliteHistoryRecorder", () => {
     ]);
   });
 
-  it("stores momentum snapshots with every component and metric", () => {
+  it("stores momentum snapshots with every component and metric", async () => {
     const recorder = new SqliteHistoryRecorder(":memory:");
 
-    recorder.recordMomentum(snapshot);
+    await recorder.recordMomentum(snapshot);
 
     expect(recorder.query("SELECT * FROM momentum_snapshots")).toEqual([
       {
@@ -176,17 +176,17 @@ describe("SqliteHistoryRecorder", () => {
     ]);
   });
 
-  it("persists to disk, creating missing folders, and reopens without losing data", () => {
+  it("persists to disk, creating missing folders, and reopens without losing data", async () => {
     const path = tempDbPath();
     const first = new SqliteHistoryRecorder(path);
-    first.recordToken(token);
-    first.close();
+    await first.recordToken(token);
+    await first.close();
 
     const reopened = new SqliteHistoryRecorder(path);
-    reopened.recordToken(token);
+    await reopened.recordToken(token);
 
     expect(reopened.query("SELECT mint FROM tokens")).toEqual([{ mint: "mint1" }]);
-    reopened.close();
+    await reopened.close();
 
     const raw = new DatabaseSync(path);
     expect(raw.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });

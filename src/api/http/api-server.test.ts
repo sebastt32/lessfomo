@@ -59,12 +59,13 @@ const screening: StoredScreening = {
 class FakeHistory implements HistoryReader {
   requestedLimits: number[] = [];
   fail = false;
-  recentScreenings(limit: number): StoredScreening[] {
+  async recentScreenings(limit: number): Promise<StoredScreening[]> {
     if (this.fail) throw new Error("disk on fire");
     this.requestedLimits.push(limit);
     return [screening];
   }
-  tokenHistory(mint: string): TokenHistory | null {
+  async tokenHistory(mint: string): Promise<TokenHistory | null> {
+    if (this.fail) throw new Error("disk on fire");
     if (mint !== MINT) return null;
     return {
       token: {
@@ -283,6 +284,18 @@ describe("API server", () => {
     history.fail = true;
 
     const response = await fetch(`${base}/api/screenings`);
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: { code: "INTERNAL_ERROR", message: "Unexpected server error" },
+    });
+  });
+
+  it("answers 500 INTERNAL_ERROR when a token history cannot be read", async () => {
+    const { history, base } = await start();
+    history.fail = true;
+
+    const response = await fetch(`${base}/api/tokens/${MINT}`);
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({

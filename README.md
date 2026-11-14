@@ -2,7 +2,8 @@
 
 Real-time memecoin screener for Solana. It detects new pump.fun tokens, discards the
 ones that fail basic safety checks, scores their on-chain buying momentum, and stores
-everything locally so the momentum hypothesis can be validated later.
+everything (in PostgreSQL, or a local SQLite file) so the momentum hypothesis can be
+validated later.
 
 It only uses free, keyless data sources.
 
@@ -36,7 +37,8 @@ All variables are optional.
 | --- | --- | --- |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC used to read mint authorities |
 | `SOLANA_WS_URL` | `wss://api.mainnet-beta.solana.com` | Solana RPC WebSocket used to stream pump.fun trades |
-| `LESSFOMO_DB_PATH` | `data/lessfomo.db` | SQLite file where history is stored |
+| `DATABASE_URL` | _(unset)_ | PostgreSQL connection string (`postgres://user:password@host:5432/db`). When unset, history is stored in SQLite |
+| `LESSFOMO_DB_PATH` | `data/lessfomo.db` | SQLite file where history is stored when `DATABASE_URL` is unset |
 | `TRACKING_WINDOW_MS` | `3600000` | How long each new token is followed for momentum |
 | `API_HOST` | `127.0.0.1` | Interface the HTTP API binds to (local only by default) |
 | `API_PORT` | `3001` | HTTP API port |
@@ -87,8 +89,11 @@ Activity multiplies everything, so a handful of wallets can never reach a high s
 
 ## History
 
-Everything is stored in a local SQLite file (Node's built-in `node:sqlite`, no extra
-dependencies). Timestamps are Unix epoch milliseconds.
+Everything is stored in PostgreSQL when `DATABASE_URL` is set, otherwise in a local
+SQLite file (Node's built-in `node:sqlite`). Both stores use the same tables and columns,
+and PostgreSQL tables are created automatically on startup. Timestamps are Unix epoch
+milliseconds (`BIGINT` in PostgreSQL). Storage errors are logged and never stop the
+live streams.
 
 | Table | Contents |
 | --- | --- |
@@ -127,9 +132,22 @@ The full contract is in [docs/API.md](docs/API.md).
 
 ```
 PumpPortal (new tokens) ──┬─→ safety checks (Solana RPC + RugCheck) ─┐
-                          │                                         ├─→ console + SQLite history
+                          │                                         ├─→ console + history (PostgreSQL or SQLite)
 Solana RPC logs (trades) ─┴─→ momentum tracker (every minute) ──────┤
                                                                     └─→ live feed → HTTP + SSE API
 ```
+
+## Docker
+
+The `Dockerfile` builds a production image that runs `node dist/main.js` as the non-root
+`node` user and listens on port `3001` on all interfaces (`API_HOST=0.0.0.0`).
+
+```bash
+docker build -t lessfomo .
+docker run -p 3001:3001 -e DATABASE_URL=postgres://user:password@host:5432/lessfomo lessfomo
+```
+
+Without `DATABASE_URL`, history goes to SQLite at `/data/lessfomo.db`; mount a volume on
+`/data` to keep it. Set `CORS_ORIGIN` to the dashboard origin when it calls the API directly.
 
 > Passing the filters does not make a token profitable. It only removes obvious scams.

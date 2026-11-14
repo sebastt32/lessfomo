@@ -44,6 +44,6 @@ export interface TokenHistory {
 /** Port: read access to stored history. */
 export interface HistoryReader {
   /** Newest first. */
-  recentScreenings(limit: number): StoredScreening[];
-  tokenHistory(mint: string): TokenHistory | null;
+  recentScreenings(limit: number): Promise<StoredScreening[]>;
+  tokenHistory(mint: string): Promise<TokenHistory | null>;
 }
