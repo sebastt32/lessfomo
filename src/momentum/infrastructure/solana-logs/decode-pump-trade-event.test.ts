@@ -42,6 +42,13 @@ describe("decodePumpTradeEvent", () => {
     expect(decodePumpTradeEvent(truncated.toString("base64"), "sig")).toBeNull();
   });
 
+  it("ignores trades on curves quoted in another token, whose SOL reserves are zero", () => {
+    const bytes = Buffer.from(fixtureData(), "base64");
+    bytes.fill(0, 8 + 32 + 8 + 8 + 1 + 32 + 8, 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8);
+
+    expect(decodePumpTradeEvent(bytes.toString("base64"), "sig")).toBeNull();
+  });
+
   it("ignores events with empty token reserves", () => {
     const bytes = Buffer.from(fixtureData(), "base64");
     bytes.fill(0, 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8, 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8 + 8);

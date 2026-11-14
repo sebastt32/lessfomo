@@ -49,7 +49,9 @@ export const decodePumpTradeEvent = (base64: string, signature: string): Trade |
   const virtualSolLamports = readU64();
   const virtualTokenUnits = readU64();
 
-  if (virtualTokenUnits === 0n) return null;
+  // Curves quoted in another token (e.g. BuyExactQuoteInV2) report zero SOL reserves:
+  // their amounts live in later fields, so they cannot be priced in SOL here.
+  if (virtualTokenUnits === 0n || virtualSolLamports === 0n) return null;
 
   return {
     signature,
