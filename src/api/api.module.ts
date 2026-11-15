@@ -32,8 +32,12 @@ import { LiveStreams } from "./live-streams.js";
   ],
 })
 export class ApiModule implements NestModule {
-  /** In this order, before routing: CORS and preflight, then 405, then 400 for an unparsable target. */
+  /**
+   * In this order, before routing: CORS and preflight, then 405, then 400 for an unparsable target.
+   * Mounted on "/" (a plain prefix, no route parameters) so Express never tries to percent-decode the
+   * path first: with a wildcard parameter, broken encodings skipped these middlewares entirely.
+   */
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(CorsMiddleware, GetOnlyMiddleware, RequestTargetMiddleware).forRoutes("{*path}");
+    consumer.apply(CorsMiddleware, GetOnlyMiddleware, RequestTargetMiddleware).forRoutes("/");
   }
 }

@@ -79,7 +79,7 @@ const parsePositiveInteger = (name: string, raw: string | null, fallback: number
 /** Reads `GET /api/tokens` parameters (first value of each), or throws 400 INVALID_QUERY naming the bad one. */
 export const parseTokenListQuery = (params: URLSearchParams, now: Date): TokenListQuery => {
   const page = parsePositiveInteger("page", params.get("page"), 1);
-  if (page < 1) throw ApiErrors.invalidQuery("page", "a positive integer");
+  if (page < 1 || !Number.isSafeInteger(page)) throw ApiErrors.invalidQuery("page", "a positive integer");
   const pageSize = parsePositiveInteger("pageSize", params.get("pageSize"), DEFAULT_PAGE_SIZE);
   return {
     from: parseInstant("from", params.get("from")),

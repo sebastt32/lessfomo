@@ -7,12 +7,15 @@ export const API_ERROR_REPORTER = Symbol("API_ERROR_REPORTER");
 export type ApiErrorReporter = (error: unknown) => void;
 
 /** Known failures keep their documented code; anything else is reported and answered as a generic 500. */
-const toApiError = (exception: unknown): ApiError | null => {
+const toApiError = (exception: unknown, path: string): ApiError | null => {
   if (exception instanceof ApiError) return exception;
   // Nest's handler for requests that match no route.
   if (exception instanceof NotFoundException) return ApiErrors.routeNotFound();
-  // Express could not percent-decode a route parameter; every route parameter is a mint.
-  if (exception instanceof BadRequestException && exception.cause instanceof URIError) return ApiErrors.invalidMint();
+  // Express could not percent-decode a route parameter. Under /api/tokens/ the parameter is a mint;
+  // anywhere else no route could have matched, as before the NestJS migration.
+  if (exception instanceof BadRequestException && exception.cause instanceof URIError) {
+    return path.startsWith("/api/tokens/") ? ApiErrors.invalidMint() : ApiErrors.routeNotFound();
+  }
   return null;
 };
 
@@ -22,8 +25,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
   constructor(@Inject(API_ERROR_REPORTER) private readonly report: ApiErrorReporter) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
-    const response = host.switchToHttp().getResponse<Response>();
-    let error = toApiError(exception);
+    const http = host.switchToHttp();
+    const response = http.getResponse<Response>();
+    const path = (http.getRequest<{ url?: string }>().url ?? "/").split("?")[0] ?? "/";
+    let error = toApiError(exception, path);
     if (error === null) {
       this.report(exception);
       if (response.headersSent) {

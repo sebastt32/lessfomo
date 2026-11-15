@@ -417,6 +417,43 @@ describe("API (Nest e2e)", () => {
     expect(raw).toContain('{"error":{"code":"BAD_REQUEST","message":"Request target is not a valid URL"}}');
   });
 
+  it("keeps CORS, preflight, 405 and 404 for paths with broken percent-encoding", async () => {
+    const { base } = await start();
+    const statusOf = (raw: string) => raw.split("\r\n")[0];
+    const origin = "Origin: http://localhost:5173";
+
+    const getMint = await rawRequest(base, `GET /api/tokens/%ZZ HTTP/1.1\r\n${origin}`);
+    const getCandles = await rawRequest(base, `GET /api/tokens/%ZZ/candles HTTP/1.1\r\n${origin}`);
+    const preflight = await rawRequest(base, `OPTIONS /api/tokens/%ZZ HTTP/1.1\r\n${origin}`);
+    const preflightRoot = await rawRequest(base, "OPTIONS /%ZZ HTTP/1.1");
+    const post = await rawRequest(base, "POST /api/tokens/%ZZ HTTP/1.1\r\nContent-Length: 0");
+    const head = await rawRequest(base, "HEAD /api/tokens/%ZZ HTTP/1.1");
+    const unknown = await rawRequest(base, "GET /api/%ZZ HTTP/1.1");
+    const health = await rawRequest(base, "GET /api/health%ZZ HTTP/1.1");
+
+    expect(statusOf(getMint)).toBe("HTTP/1.1 400 Bad Request");
+    expect(getMint).toContain('"code":"INVALID_MINT"');
+    expect(getMint.toLowerCase()).toContain("access-control-allow-origin: http://localhost:5173");
+    expect(getCandles.toLowerCase()).toContain("access-control-allow-origin: http://localhost:5173");
+    expect(getCandles).toContain('"code":"INVALID_MINT"');
+    expect(statusOf(preflight)).toBe("HTTP/1.1 204 No Content");
+    expect(statusOf(preflightRoot)).toBe("HTTP/1.1 204 No Content");
+    expect(statusOf(post)).toBe("HTTP/1.1 405 Method Not Allowed");
+    expect(statusOf(head)).toBe("HTTP/1.1 405 Method Not Allowed");
+    expect(statusOf(unknown)).toBe("HTTP/1.1 404 Not Found");
+    expect(unknown).toContain('"code":"NOT_FOUND"');
+    expect(statusOf(health)).toBe("HTTP/1.1 404 Not Found");
+  });
+
+  it("answers 400 INVALID_QUERY for a page number beyond the safe integer range", async () => {
+    const { base } = await start();
+
+    const response = await fetch(`${base}/api/tokens?page=99999999999999999999`);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("INVALID_QUERY");
+  });
+
   it("closes cleanly even if events arrive while streams are closing", async () => {
     const { feed, base } = await start({ heartbeatMs: 1 });
     const response = await fetch(`${base}/api/stream`);
