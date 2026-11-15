@@ -119,6 +119,57 @@ interface TradeView {
 
 Market cap is derived on the client: `priceSol × totalSupply`, and in USD `× solUsd`.
 
+```ts
+/** Liquidity of the token's market. On the pump.fun bonding curve it is the real SOL in the curve. */
+interface Liquidity {
+  sol: number | null;             // null until a trade or pool reading is known
+  bondingCurvePct: number | null; // 0-100 progress of the pump.fun curve; 100 once migrated; null if unknown
+  migrated: boolean;              // true once the token moved to PumpSwap
+}
+
+type Lifecycle = "active" | "dead";   // dead = no trades for 24 hours
+
+type SnapshotMilestone =
+  | "0m" | "1m" | "5m" | "10m" | "15m" | "30m"
+  | "1h" | "2h" | "4h" | "6h" | "12h" | "24h"
+  | "d2" | "d3" | "d4" | "d5" | "d6" | "d7"      // daily for 7 days
+  | "w2" | "w3" | "w4" | "w5" | "w6" | "w7" | "w8" // then weekly (continues while active)
+  | "event:migrated" | "event:new-peak"
+  | "event:holders-100" | "event:holders-500" | "event:holders-1000";
+
+interface TokenSnapshot {
+  milestone: SnapshotMilestone | string;  // weekly milestones continue past w8 (w9, w10, ...)
+  at: string;                     // ISO time the snapshot was taken
+  priceSol: number | null;
+  marketCapSol: number | null;
+  volumeSol: number | null;       // volume since the previous snapshot
+  buys: number | null;            // since the previous snapshot
+  sells: number | null;
+  uniqueBuyers: number | null;    // since the previous snapshot
+  holders: number | null;
+  top10Pct: number | null;
+  devHoldsPct: number | null;
+  liquidity: Liquidity;
+  source: "trades" | "dexscreener" | "rugcheck" | "mixed";
+}
+
+interface TokenListItem {
+  token: TokenView;               // detectedAt is the token's creation date and time
+  status: SafetyStatus;
+  lifecycle: Lifecycle;
+  liquidity: Liquidity;           // latest known
+  lastPriceSol: number | null;
+  lastMarketCapSol: number | null;
+  peakMarketCapSol: number | null;
+  maxScore: number | null;        // highest momentum score ever recorded
+  holders: number | null;         // latest known
+  lastTradeAt: string | null;
+  snapshotCount: number;
+}
+```
+
+`Mover` gains `liquidity: Liquidity`. `TokenView.detectedAt` is shown as the creation date and time.
+
 ## Endpoints
 
 ### `GET /api/health`
@@ -179,6 +230,43 @@ valid mint is accepted (the token may appear later).
 | `sol-price` | `{ "solUsd": number }` | Once right after connecting (if known), then whenever it changes |
 
 Heartbeat `: ping` every 15 seconds, like `/api/stream`.
+
+### `GET /api/tokens?from=&to=&status=&lifecycle=&minScore=&sort=&page=&pageSize=`
+
+Every token ever detected, from the database, newest first by default.
+
+| Param | Default | Description |
+| --- | --- | --- |
+| `from`, `to` | none | ISO dates (inclusive `from`, exclusive `to`) on `detectedAt`; e.g. a day, a month or a year |
+| `status` | all | `passed`, `failed`, `unverified`, `pending` (comma-separated allowed) |
+| `lifecycle` | all | `active` or `dead` |
+| `minScore` | none | Only tokens whose `maxScore` is at least this (0-100) |
+| `q` | none | Case-insensitive match on symbol, name or mint prefix |
+| `sort` | `detectedAt:desc` | `detectedAt`, `maxScore`, `peakMarketCapSol`, `liquidity` with `:asc` or `:desc` |
+| `page`, `pageSize` | `1`, `50` | `pageSize` clamped to `1..200` |
+
+Invalid values → `400 INVALID_QUERY` with a message naming the parameter.
+
+```json
+{ "tokens": [TokenListItem], "page": 1, "pageSize": 50, "total": 1234 }
+```
+
+### `GET /api/tokens/:mint/snapshots`
+
+All snapshots of a token, oldest first. Same `INVALID_MINT` / `TOKEN_NOT_FOUND` errors.
+
+```json
+{ "mint": string, "lifecycle": "active", "snapshots": [TokenSnapshot] }
+```
+
+### `GET /api/stats`
+
+```json
+{ "since": "2026-11-14T03:15:03.912Z",          // first token ever stored
+  "tokens": { "total": 1234, "active": 210, "dead": 1024, "migrated": 3 },
+  "screenings": { "passed": 80, "failed": 900, "unverified": 40, "pending": 214 },
+  "trades": 456789, "snapshots": 23456 }
+```
 
 ### `GET /api/stream`
 
