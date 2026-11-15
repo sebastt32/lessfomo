@@ -9,17 +9,24 @@ import type { MomentumSnapshot } from "../../momentum/application/momentum-track
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
+import type { SnapshotStore } from "../../snapshots/domain/snapshot-store.js";
+import type { TokenSnapshot } from "../../snapshots/domain/assemble-snapshot.js";
 import type { HistoryReader } from "../domain/history-reader.js";
 import type { HistoryRecorder } from "../domain/history-recorder.js";
+import type { TokenCatalogReader, TokenListQuery } from "../domain/token-catalog-reader.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
-type History = HistoryRecorder & HistoryReader;
+type History = HistoryRecorder & HistoryReader & SnapshotStore & TokenCatalogReader;
 
 interface OpenedHistory {
   readonly history: History;
   /** Number of rows stored in a table. */
   count(table: string): Promise<number>;
+  /** Runs raw SQL statements. */
+  exec(sql: string): Promise<void>;
+  /** Closes and opens the same database again, running the migrations once more. */
+  reopen(): Promise<OpenedHistory>;
   close(): Promise<void>;
 }
 
@@ -87,18 +94,34 @@ const trade: Trade = {
   timestamp: new Date("2026-11-13T20:01:00.000Z"),
 };
 
+const sqliteDirs: string[] = [];
+const openSqlite = (path: string): OpenedHistory => {
+  const history = new SqliteHistoryRecorder(path);
+  return {
+    history,
+    count: async (table) => Number(history.query(`SELECT COUNT(*) AS n FROM ${table}`)[0]?.["n"]),
+    exec: async (sql) => {
+      for (const statement of sql.split(";")) if (statement.trim()) history.query(statement);
+    },
+    reopen: async () => {
+      await history.close();
+      return openSqlite(path);
+    },
+    close: () => history.close(),
+  };
+};
+
 const sqliteAdapter: Adapter = {
   name: "SQLite",
   setup: async () => {},
   open: async () => {
-    const history = new SqliteHistoryRecorder(":memory:");
-    return {
-      history,
-      count: async (table) => Number(history.query(`SELECT COUNT(*) AS n FROM ${table}`)[0]?.["n"]),
-      close: () => history.close(),
-    };
+    const dir = mkdtempSync(join(tmpdir(), "lessfomo-contract-"));
+    sqliteDirs.push(dir);
+    return openSqlite(join(dir, "history.db"));
   },
-  teardown: async () => {},
+  teardown: async () => {
+    for (const dir of sqliteDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  },
 };
 
 const freePort = (): Promise<number> =>
@@ -145,12 +168,20 @@ const createPostgresAdapter = (): Adapter & { databaseUrl(database: string): str
       await admin.query(`CREATE DATABASE ${database}`);
       await admin.end();
 
-      const history = await PostgresHistory.connect(databaseUrl(database));
-      return {
-        history,
-        count: async (table) => Number((await history.query(`SELECT COUNT(*) AS n FROM ${table}`))[0]?.["n"]),
-        close: () => history.close(),
+      const connect = async (): Promise<OpenedHistory> => {
+        const history = await PostgresHistory.connect(databaseUrl(database));
+        return {
+          history,
+          count: async (table) => Number((await history.query(`SELECT COUNT(*) AS n FROM ${table}`))[0]?.["n"]),
+          exec: async (sql) => void (await history.query(sql)),
+          reopen: async () => {
+            await history.close();
+            return connect();
+          },
+          close: () => history.close(),
+        };
       };
+      return connect();
     },
     teardown: async () => {
       await server?.stop();
@@ -172,6 +203,19 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
     const store = opened.at(-1);
     if (!store) throw new Error("no history opened");
     return store.count(table);
+  };
+  const execOnLast = async (sql: string): Promise<void> => {
+    const store = opened.at(-1);
+    if (!store) throw new Error("no history opened");
+    await store.exec(sql);
+  };
+  /** Closes the latest history and opens its database again. */
+  const reopenLast = async (): Promise<History> => {
+    const store = opened.pop();
+    if (!store) throw new Error("no history opened");
+    const reopened = await store.reopen();
+    opened.push(reopened);
+    return reopened.history;
   };
 
   beforeAll(() => adapter.setup(), 120_000);
@@ -202,6 +246,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         creatorPct: null,
         totalHolders: null,
         evaluatedAt: new Date("2026-11-13T20:02:00.000Z"),
+        detectedAt: new Date("2026-11-13T20:00:00.000Z"),
       },
       {
         mint: "a",
@@ -214,6 +259,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         creatorPct: 1,
         totalHolders: 3,
         evaluatedAt: new Date("2026-11-13T20:01:00.000Z"),
+        detectedAt: new Date("2026-11-13T20:00:00.000Z"),
       },
     ]);
   });
@@ -237,7 +283,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
     await history.recordScreening(failed("ghost"), new Date("2026-11-13T20:01:00.000Z"));
 
     expect(await history.recentScreenings(10)).toEqual([
-      expect.objectContaining({ mint: "ghost", symbol: "", name: "" }),
+      expect.objectContaining({ mint: "ghost", symbol: "", name: "", detectedAt: null }),
     ]);
   });
 
@@ -474,6 +520,430 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         { at: new Date(base + 1_000), side: "buy", solAmount: 0.5 },
         { at: new Date(base + 61_500), side: "sell", solAmount: 1.5 },
       ]);
+    });
+  });
+
+  describe("token catalog and snapshots", () => {
+    const NOW = new Date("2026-11-14T12:00:00.000Z");
+    const HOUR = 3_600_000;
+    const ago = (ms: number) => new Date(NOW.getTime() - ms);
+    const query = (overrides: Partial<TokenListQuery> = {}): TokenListQuery => ({
+      from: null,
+      to: null,
+      statuses: [],
+      lifecycle: null,
+      minScore: null,
+      search: null,
+      sort: { field: "detectedAt", direction: "desc" },
+      page: 1,
+      pageSize: 50,
+      now: NOW,
+      ...overrides,
+    });
+    const mintsOf = async (history: History, overrides: Partial<TokenListQuery> = {}) =>
+      (await history.listTokens(query(overrides))).tokens.map((entry) => entry.token.mint);
+    const snapshot = (mint: string, milestone: string, at: Date, overrides: Partial<TokenSnapshot> = {}): TokenSnapshot => ({
+      mint,
+      milestone,
+      at,
+      priceSol: 0.00000004,
+      marketCapSol: 40,
+      volumeSol: 3.5,
+      buys: 7,
+      sells: 2,
+      uniqueBuyers: 5,
+      holders: null,
+      top10Pct: null,
+      devHoldsPct: null,
+      liquidity: { sol: 12.5, bondingCurvePct: 40.25, migrated: false },
+      source: "trades",
+      ...overrides,
+    });
+    const passed = (mint: string, totalHolders: number): ScreeningResult => ({
+      token: token(mint),
+      status: "passed",
+      report: { passed: true, failures: [], metrics: { top10Pct: 12, creatorPct: 1, totalHolders } },
+    });
+
+    it("lists every token newest first with its latest state", async () => {
+      const history = await open();
+      await history.recordToken(token("old", { detectedAt: ago(30 * HOUR) }));
+      await history.recordToken(token("new", { detectedAt: ago(HOUR) }));
+      await history.recordScreening(passed("new", 61), ago(HOUR));
+      await history.recordMomentum(point("new", ago(50 * 60_000).toISOString(), 40));
+      await history.recordMomentum(point("new", ago(40 * 60_000).toISOString(), 25));
+      await history.updateMarkets([
+        {
+          mint: "new",
+          lastPriceSol: 0.00000005,
+          peakPriceSol: 0.00000009,
+          lastTradeAt: ago(10 * 60_000),
+          lastActivityAt: ago(10 * 60_000),
+          liquidity: { sol: 20.5, bondingCurvePct: 60.5, migrated: false },
+        },
+      ]);
+      await history.saveSnapshot(snapshot("new", "0m", ago(HOUR)), {});
+
+      const list = await history.listTokens(query());
+
+      expect(list.total).toBe(2);
+      expect(list.tokens).toEqual([
+        {
+          token: {
+            mint: "new",
+            symbol: "NEW",
+            name: "Name new",
+            creator: "dev",
+            metadataUri: "https://example.com/meta.json",
+            initialBuySol: 0.5,
+            marketCapSol: 28,
+            detectedAt: ago(HOUR),
+          },
+          status: "passed",
+          lifecycle: "active",
+          liquidity: { sol: 20.5, bondingCurvePct: 60.5, migrated: false },
+          lastPriceSol: 0.00000005,
+          peakPriceSol: 0.00000009,
+          maxScore: 40,
+          holders: 61,
+          lastTradeAt: ago(10 * 60_000),
+          snapshotCount: 1,
+        },
+        expect.objectContaining({
+          token: expect.objectContaining({ mint: "old" }),
+          status: "pending",
+          lifecycle: "dead",
+          liquidity: { sol: null, bondingCurvePct: null, migrated: false },
+          lastPriceSol: null,
+          peakPriceSol: null,
+          maxScore: null,
+          holders: null,
+          lastTradeAt: null,
+          snapshotCount: 0,
+        }),
+      ]);
+    });
+
+    it("filters by creation time, status, lifecycle, score and text, counting every match", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(48 * HOUR), symbol: "CATS", name: "Cat Coin" }));
+      await history.recordToken(token("b", { detectedAt: ago(5 * HOUR), symbol: "DOG", name: "Doggo 100%" }));
+      await history.recordToken(token("c", { detectedAt: ago(2 * HOUR), symbol: "FROG", name: "Frog" }));
+      await history.recordToken(token("Cd9", { detectedAt: ago(HOUR), symbol: "X_Y", name: "Pepe" }));
+      await history.recordScreening(failed("a"), ago(47 * HOUR));
+      await history.recordScreening(passed("b", 30), ago(5 * HOUR));
+      await history.recordScreening({ token: token("c"), status: "unverified", reason: "x" }, ago(2 * HOUR));
+      await history.recordMomentum(point("b", ago(4 * HOUR).toISOString(), 70));
+      await history.recordMomentum(point("c", ago(HOUR).toISOString(), 30));
+
+      expect(await mintsOf(history, { from: ago(5 * HOUR), to: ago(HOUR) })).toEqual(["c", "b"]);
+      expect(await mintsOf(history, { statuses: ["failed", "pending"] })).toEqual(["Cd9", "a"]);
+      expect(await mintsOf(history, { lifecycle: "dead" })).toEqual(["a"]);
+      expect(await mintsOf(history, { lifecycle: "active" })).toEqual(["Cd9", "c", "b"]);
+      expect(await mintsOf(history, { minScore: 30 })).toEqual(["c", "b"]);
+      expect(await mintsOf(history, { search: "cat" })).toEqual(["a"]);
+      expect(await mintsOf(history, { search: "DOGGO" })).toEqual(["b"]);
+      expect(await mintsOf(history, { search: "c" })).toEqual(["Cd9", "c", "a"]);
+      expect(await mintsOf(history, { search: "100%" })).toEqual(["b"]);
+      expect(await mintsOf(history, { search: "%" })).toEqual(["b"]);
+      expect(await mintsOf(history, { search: "x_" })).toEqual(["Cd9"]);
+      expect(await mintsOf(history, { search: "_" })).toEqual(["Cd9"]);
+
+      const page = await history.listTokens(query({ page: 2, pageSize: 3 }));
+      expect(page.total).toBe(4);
+      expect(page.tokens.map((entry) => entry.token.mint)).toEqual(["a"]);
+    });
+
+    it("sorts by score, peak market cap or liquidity, unknown values last", async () => {
+      const history = await open();
+      for (const [index, mint] of ["a", "b", "c"].entries()) {
+        await history.recordToken(token(mint, { detectedAt: ago((3 - index) * HOUR) }));
+      }
+      await history.recordMomentum(point("a", ago(HOUR).toISOString(), 10));
+      await history.recordMomentum(point("b", ago(HOUR).toISOString(), 50));
+      const market = (mint: string, peak: number, sol: number) => ({
+        mint,
+        lastPriceSol: null,
+        peakPriceSol: peak,
+        lastTradeAt: null,
+        lastActivityAt: null,
+        liquidity: { sol, bondingCurvePct: null, migrated: false },
+      });
+      await history.updateMarkets([market("a", 0.3, 5), market("c", 0.1, 50)]);
+
+      expect(await mintsOf(history, { sort: { field: "maxScore", direction: "desc" } })).toEqual(["b", "a", "c"]);
+      expect(await mintsOf(history, { sort: { field: "maxScore", direction: "asc" } })).toEqual(["a", "b", "c"]);
+      expect(await mintsOf(history, { sort: { field: "peakMarketCapSol", direction: "desc" } })).toEqual(["a", "c", "b"]);
+      expect(await mintsOf(history, { sort: { field: "liquidity", direction: "asc" } })).toEqual(["a", "c", "b"]);
+      expect(await mintsOf(history, { sort: { field: "detectedAt", direction: "asc" } })).toEqual(["a", "b", "c"]);
+    });
+
+    it("keeps the highest peak, the latest trade and migration once seen", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(HOUR) }));
+      const update = { mint: "a", lastPriceSol: null, peakPriceSol: null, lastTradeAt: null, lastActivityAt: null };
+      await history.updateMarkets([
+        { ...update, peakPriceSol: 0.5, lastTradeAt: ago(60_000), liquidity: { sol: 80, bondingCurvePct: 100, migrated: true } },
+      ]);
+      await history.updateMarkets([
+        { ...update, peakPriceSol: 0.2, lastTradeAt: ago(120_000), lastPriceSol: 0.2, liquidity: { sol: null, bondingCurvePct: null, migrated: false } },
+      ]);
+
+      const [entry] = (await history.listTokens(query())).tokens;
+
+      expect(entry).toMatchObject({
+        peakPriceSol: 0.5,
+        lastPriceSol: 0.2,
+        lastTradeAt: ago(60_000),
+        liquidity: { sol: 80, bondingCurvePct: 100, migrated: true },
+      });
+    });
+
+    it("schedules the 0m snapshot of a new token at its creation and moves the schedule on save", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(10 * 60_000), marketCapSol: 30, bondingCurve: "curveA" }));
+      await history.recordToken(token("b", { detectedAt: ago(60_000) }));
+      await history.recordToken(token("a", { detectedAt: ago(5 * 60_000) }));
+
+      const due = await history.dueTokens(NOW, 10);
+
+      expect(due.map((d) => [d.mint, d.nextMilestone])).toEqual([
+        ["a", "0m"],
+        ["b", "0m"],
+      ]);
+      expect(due[0]).toEqual({
+        mint: "a",
+        symbol: "A",
+        creator: "dev",
+        bondingCurve: "curveA",
+        detectedAt: ago(10 * 60_000),
+        creationPriceSol: 0.00000003,
+        nextMilestone: "0m",
+        lastSnapshotAt: null,
+        market: {
+          liquidity: { sol: null, bondingCurvePct: null, migrated: false },
+          lastPriceSol: null,
+          peakPriceSol: null,
+          lastTradeAt: null,
+          lastActivityAt: null,
+          holders: null,
+          holderThreshold: 0,
+          lastMilestone: null,
+          peakEventWindow: null,
+        },
+      });
+      expect((await history.dueTokens(NOW, 1)).map((d) => d.mint)).toEqual(["a"]);
+      expect(await history.dueTokens(ago(11 * 60_000), 10)).toEqual([]);
+
+      await history.saveSnapshot(snapshot("a", "10m", ago(1_000)), {
+        next: { milestone: "15m", at: new Date(NOW.getTime() + 5 * 60_000) },
+        lastMilestone: "10m",
+      });
+      await history.saveSnapshot(snapshot("a", "event:new-peak", NOW), { peakEventWindow: "10m", holderThreshold: 100 });
+
+      expect((await history.dueTokens(NOW, 10)).map((d) => d.mint)).toEqual(["b"]);
+      const later = (await history.dueTokens(new Date(NOW.getTime() + 5 * 60_000), 10)).find((d) => d.mint === "a");
+      expect(later).toMatchObject({
+        mint: "a",
+        nextMilestone: "15m",
+        lastSnapshotAt: NOW,
+        market: { lastMilestone: "10m", peakEventWindow: "10m", holderThreshold: 100 },
+      });
+    });
+
+    it("stops the schedule of a dead token and reports it as dead", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(HOUR) }));
+
+      await history.markDead("a");
+
+      expect(await history.dueTokens(NOW, 10)).toEqual([]);
+      expect((await history.listTokens(query())).tokens[0]?.lifecycle).toBe("dead");
+      expect((await history.tokenSnapshots("a", NOW))?.lifecycle).toBe("dead");
+    });
+
+    it("lists the tokens still on schedule since a time, to watch them after a restart", async () => {
+      const history = await open();
+      await history.recordToken(token("old", { detectedAt: ago(30 * HOUR) }));
+      await history.recordToken(token("a", { detectedAt: ago(2 * HOUR) }));
+      await history.recordToken(token("b", { detectedAt: ago(HOUR) }));
+      await history.recordToken(token("dead", { detectedAt: ago(HOUR) }));
+      await history.markDead("dead");
+      await history.updateMarkets([
+        { mint: "a", lastPriceSol: 0.1, peakPriceSol: 0.2, lastTradeAt: null, lastActivityAt: null, liquidity: null },
+      ]);
+
+      const watched = await history.watchedTokens(ago(24 * HOUR), 10);
+
+      expect(watched.map((w) => w.mint)).toEqual(["b", "a"]);
+      expect(watched[1]).toMatchObject({ detectedAt: ago(2 * HOUR), market: { lastPriceSol: 0.1, peakPriceSol: 0.2 } });
+      expect((await history.watchedTokens(ago(24 * HOUR), 1)).map((w) => w.mint)).toEqual(["b"]);
+    });
+
+    it("aggregates the stored trades of a token between two snapshots", async () => {
+      const history = await open();
+      const at = (ms: number, overrides: Partial<Trade>): Trade => ({
+        ...trade,
+        signature: `s${ms}${overrides.trader ?? ""}${overrides.side ?? ""}`,
+        timestamp: new Date(ago(HOUR).getTime() + ms),
+        ...overrides,
+      });
+      await history.recordTrade(at(0, { priceSol: 1, solAmount: 1 }));
+      await history.recordTrade(at(1_000, { priceSol: 2, solAmount: 2, trader: "x" }));
+      await history.recordTrade(at(2_000, { priceSol: 3, solAmount: 0.5, trader: "x" }));
+      await history.recordTrade(at(3_000, { priceSol: 4, solAmount: 0.25, side: "sell", trader: "y" }));
+      await history.recordTrade(at(9_000, { priceSol: 9, solAmount: 10 }));
+      await history.recordTrade(at(2_500, { mint: "other", priceSol: 100, solAmount: 100 }));
+
+      expect(await history.tradeWindow("a", new Date(ago(HOUR).getTime()), new Date(ago(HOUR).getTime() + 3_000))).toEqual({
+        lastPriceSol: 4,
+        volumeSol: 2.75,
+        buys: 2,
+        sells: 1,
+        uniqueBuyers: 1,
+      });
+      expect(await history.tradeWindow("a", null, new Date(ago(HOUR).getTime() + 1_000))).toMatchObject({
+        lastPriceSol: 2,
+        buys: 2,
+        uniqueBuyers: 2,
+      });
+      expect(await history.tradeWindow("a", new Date(ago(HOUR).getTime() + 3_000), new Date(ago(HOUR).getTime() + 5_000))).toEqual({
+        lastPriceSol: 4,
+        volumeSol: 0,
+        buys: 0,
+        sells: 0,
+        uniqueBuyers: 0,
+      });
+      expect(await history.tradeWindow("none", null, NOW)).toEqual({
+        lastPriceSol: null,
+        volumeSol: 0,
+        buys: 0,
+        sells: 0,
+        uniqueBuyers: 0,
+      });
+    });
+
+    it("returns the snapshots of a token oldest first, once each, with holders added later", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(2 * HOUR) }));
+      await history.saveSnapshot(snapshot("a", "1h", ago(HOUR), { source: "dexscreener", uniqueBuyers: null }), {});
+      await history.saveSnapshot(snapshot("a", "0m", ago(2 * HOUR)), {});
+      await history.saveSnapshot(snapshot("a", "0m", ago(2 * HOUR), { priceSol: 1 }), {});
+      await history.saveSnapshot(
+        snapshot("a", "event:migrated", ago(HOUR), { priceSol: null, marketCapSol: null, liquidity: { sol: null, bondingCurvePct: 100, migrated: true } }),
+        {},
+      );
+      await history.addSnapshotHolders("a", "1h", ago(HOUR), { holders: 150, top10Pct: 22.5, devHoldsPct: 1.25 });
+
+      const result = await history.tokenSnapshots("a", NOW);
+
+      expect(result?.lifecycle).toBe("active");
+      expect(result?.snapshots).toEqual([
+        snapshot("a", "0m", ago(2 * HOUR)),
+        snapshot("a", "1h", ago(HOUR), {
+          source: "mixed",
+          uniqueBuyers: null,
+          holders: 150,
+          top10Pct: 22.5,
+          devHoldsPct: 1.25,
+        }),
+        snapshot("a", "event:migrated", ago(HOUR), {
+          priceSol: null,
+          marketCapSol: null,
+          liquidity: { sol: null, bondingCurvePct: 100, migrated: true },
+        }),
+      ]);
+      expect((await history.listTokens(query())).tokens[0]).toMatchObject({ holders: 150, snapshotCount: 3 });
+      expect(await history.tokenSnapshots("nope", NOW)).toBeNull();
+    });
+
+    it("marks holder data on an otherwise empty snapshot as coming from RugCheck", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      const empty = snapshot("a", "2h", ago(HOUR), {
+        priceSol: null,
+        marketCapSol: null,
+        volumeSol: null,
+        buys: null,
+        sells: null,
+        uniqueBuyers: null,
+        liquidity: { sol: null, bondingCurvePct: null, migrated: false },
+      });
+      await history.saveSnapshot(empty, {});
+      await history.addSnapshotHolders("a", "2h", ago(HOUR), { holders: 3, top10Pct: 90, devHoldsPct: 50 });
+
+      expect((await history.tokenSnapshots("a", NOW))?.snapshots[0]?.source).toBe("rugcheck");
+    });
+
+    it("counts tokens, statuses, trades and snapshots", async () => {
+      const history = await open();
+      expect(await history.stats(NOW)).toEqual({
+        since: null,
+        tokens: { total: 0, active: 0, dead: 0, migrated: 0 },
+        screenings: { passed: 0, failed: 0, unverified: 0, pending: 0 },
+        trades: 0,
+        snapshots: 0,
+      });
+
+      await history.recordToken(token("a", { detectedAt: ago(30 * HOUR) }));
+      await history.recordToken(token("b", { detectedAt: ago(HOUR) }));
+      await history.recordToken(token("c", { detectedAt: ago(2 * HOUR) }));
+      await history.recordScreening(failed("a"), ago(29 * HOUR));
+      await history.recordScreening(passed("b", 40), ago(HOUR));
+      await history.recordScreening(failed("b"), ago(HOUR));
+      await history.recordTrade(trade);
+      await history.updateMarkets([
+        { mint: "c", lastPriceSol: null, peakPriceSol: null, lastTradeAt: null, lastActivityAt: null, liquidity: { sol: 85, bondingCurvePct: 100, migrated: true } },
+      ]);
+      await history.saveSnapshot(snapshot("b", "0m", ago(HOUR)), {});
+
+      expect(await history.stats(NOW)).toEqual({
+        since: ago(30 * HOUR),
+        tokens: { total: 3, active: 2, dead: 1, migrated: 1 },
+        screenings: { passed: 0, failed: 2, unverified: 0, pending: 1 },
+        trades: 1,
+        snapshots: 1,
+      });
+    });
+
+    it("migrates a database created before snapshots, keeping and indexing its data", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(2 * HOUR) }));
+      await history.recordToken(token("b", { detectedAt: ago(30 * HOUR) }));
+      await history.recordScreening(passed("a", 80), ago(2 * HOUR));
+      await history.recordScreening(failed("a"), ago(HOUR));
+      await history.recordMomentum(point("a", ago(90 * 60_000).toISOString(), 55));
+      await history.recordMomentum(point("a", ago(80 * 60_000).toISOString(), 35));
+      await history.recordTrade({ ...trade, signature: "t1", priceSol: 0.4, timestamp: ago(100 * 60_000) });
+      await history.recordTrade({ ...trade, signature: "t2", priceSol: 0.2, timestamp: ago(70 * 60_000) });
+      // The database as it was before this version: no snapshot tables, no new indexes.
+      await execOnLast("DROP TABLE token_state; DROP TABLE token_snapshots; DROP INDEX tokens_detected_at");
+
+      const migrated = await reopenLast();
+      const firstList = await migrated.listTokens(query());
+      const again = await reopenLast();
+
+      expect(await countOf("tokens")).toBe(2);
+      expect(await countOf("trades")).toBe(2);
+      expect((await again.listTokens(query())).tokens).toEqual(firstList.tokens);
+      expect(firstList.tokens).toEqual([
+        expect.objectContaining({
+          token: expect.objectContaining({ mint: "a" }),
+          status: "failed",
+          lifecycle: "active",
+          maxScore: 55,
+          holders: 3,
+          lastPriceSol: 0.2,
+          peakPriceSol: 0.4,
+          lastTradeAt: ago(70 * 60_000),
+        }),
+        expect.objectContaining({ token: expect.objectContaining({ mint: "b" }), status: "pending", lifecycle: "dead" }),
+      ]);
+      expect((await again.dueTokens(NOW, 10)).map((d) => [d.mint, d.nextMilestone])).toEqual([
+        ["b", "0m"],
+        ["a", "0m"],
+      ]);
+      expect((await again.recentScreenings(1))[0]?.detectedAt).toEqual(ago(2 * HOUR));
     });
   });
 });

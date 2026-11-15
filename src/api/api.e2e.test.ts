@@ -6,6 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadAppConfig, type AppConfig } from "../config/app-config.js";
 import { ConfigModule } from "../config/config.module.js";
 import type { HistoryReader, StoredScreening, TokenChart, TokenHistory } from "../history/domain/history-reader.js";
+import type {
+  HistoryStats,
+  TokenCatalogReader,
+  TokenList,
+  TokenListQuery,
+  TokenSnapshots,
+} from "../history/domain/token-catalog-reader.js";
 import { HISTORY_STORE } from "../history/history.module.js";
 import { LiveFeed } from "../live-feed/application/live-feed.js";
 import { LIVE_FEED } from "../live-feed/live-feed.module.js";
@@ -67,6 +74,39 @@ const screening: StoredScreening = {
   creatorPct: 0,
   totalHolders: 3,
   evaluatedAt: new Date("2026-11-13T20:02:00.000Z"),
+  detectedAt: new Date("2026-11-13T20:01:00.000Z"),
+};
+const SCREENING_VIEW = { ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z", detectedAt: "2026-11-13T20:01:00.000Z" };
+const UNKNOWN_LIQUIDITY = { sol: null, bondingCurvePct: null, migrated: false };
+
+const tokenSnapshots: TokenSnapshots = {
+  lifecycle: "active",
+  snapshots: [
+    {
+      mint: MINT,
+      milestone: "0m",
+      at: new Date("2026-11-13T20:01:03.000Z"),
+      priceSol: 0.00000003,
+      marketCapSol: 30,
+      volumeSol: 0.5,
+      buys: 1,
+      sells: 0,
+      uniqueBuyers: 1,
+      holders: null,
+      top10Pct: null,
+      devHoldsPct: null,
+      liquidity: { sol: 1.5, bondingCurvePct: 4.25, migrated: false },
+      source: "trades",
+    },
+  ],
+};
+
+const stats: HistoryStats = {
+  since: new Date("2026-11-13T20:01:00.000Z"),
+  tokens: { total: 3, active: 2, dead: 1, migrated: 1 },
+  screenings: { passed: 1, failed: 1, unverified: 0, pending: 1 },
+  trades: 40,
+  snapshots: 7,
 };
 
 const chart: TokenChart = {
@@ -114,8 +154,9 @@ const trade = (overrides: Partial<Trade> = {}): Trade => ({
   ...overrides,
 });
 
-class FakeHistory implements HistoryReader {
+class FakeHistory implements HistoryReader, TokenCatalogReader {
   closed = false;
+  listQueries: TokenListQuery[] = [];
   requestedLimits: number[] = [];
   chartRequests: { mint: string; intervalSeconds: number; limit: number }[] = [];
   fail = false;
@@ -147,6 +188,35 @@ class FakeHistory implements HistoryReader {
     if (this.fail) throw new Error("disk on fire");
     this.chartRequests.push({ mint, intervalSeconds, limit });
     return mint === MINT ? chart : null;
+  }
+  async listTokens(query: TokenListQuery): Promise<TokenList> {
+    if (this.fail) throw new Error("disk on fire");
+    this.listQueries.push(query);
+    return {
+      total: 51,
+      tokens: [
+        {
+          token: { ...token, detectedAt: token.detectedAt },
+          status: "passed",
+          lifecycle: "active",
+          liquidity: { sol: 12.5, bondingCurvePct: 40.25, migrated: false },
+          lastPriceSol: 0.00000004,
+          peakPriceSol: 0.00000009,
+          maxScore: 63,
+          holders: 61,
+          lastTradeAt: new Date("2026-11-13T20:30:00.000Z"),
+          snapshotCount: 5,
+        },
+      ],
+    };
+  }
+  async tokenSnapshots(mint: string): Promise<TokenSnapshots | null> {
+    if (this.fail) throw new Error("disk on fire");
+    return mint === MINT ? tokenSnapshots : null;
+  }
+  async stats(): Promise<HistoryStats> {
+    if (this.fail) throw new Error("disk on fire");
+    return stats;
   }
   async close(): Promise<void> {
     this.closed = true;
@@ -252,9 +322,21 @@ describe("API (Nest e2e)", () => {
           score: 21,
           components,
           metrics,
+          liquidity: UNKNOWN_LIQUIDITY,
         },
       ],
     });
+  });
+
+  it("reports each mover's latest bonding curve liquidity from its trades", async () => {
+    const { feed, base } = await start();
+    feed.tokenDetected(token);
+    feed.tradeRecorded(trade({ curve: { realSolReserves: 16.77, progressPct: 48.51, complete: false } }));
+    feed.momentumUpdated([snapshot], snapshot.at);
+
+    const body = await (await fetch(`${base}/api/movers`)).json();
+
+    expect(body.movers[0].liquidity).toEqual({ sol: 16.77, bondingCurvePct: 48.51, migrated: false });
   });
 
   it("clamps limits and falls back to the default for invalid ones", async () => {
@@ -272,7 +354,7 @@ describe("API (Nest e2e)", () => {
     const { base } = await start();
 
     expect(await (await fetch(`${base}/api/screenings`)).json()).toEqual({
-      screenings: [{ ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z" }],
+      screenings: [SCREENING_VIEW],
     });
   });
 
@@ -293,7 +375,7 @@ describe("API (Nest e2e)", () => {
         detectedAt: "2026-11-13T20:01:00.000Z",
       },
       status: "failed",
-      screenings: [{ ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z" }],
+      screenings: [SCREENING_VIEW],
       momentum: [{ at: "2026-11-13T20:05:00.000Z", score: 21, components, metrics }],
     });
   });
@@ -453,6 +535,7 @@ describe("API (Nest e2e)", () => {
       creatorPct: null,
       totalHolders: null,
       evaluatedAt: "2026-11-13T20:02:00.000Z",
+      detectedAt: "2026-11-13T20:01:00.000Z",
     });
     expect(momentumData.at).toBe("2026-11-13T20:05:00.000Z");
     expect(momentumData.movers[0]).toMatchObject({ mint: MINT, status: "unverified", score: 21 });
@@ -482,7 +565,7 @@ describe("API (Nest e2e)", () => {
     it("matches paths case-sensitively and without a trailing slash", async () => {
       const { base } = await start();
 
-      for (const path of ["/api/health/", "/API/health", "/api/movers/", "/api/tokens", "/"]) {
+      for (const path of ["/api/health/", "/API/health", "/api/movers/", "/api/stats/", "/API/tokens", "/"]) {
         const response = await fetch(`${base}${path}`);
         expect(response.status, path).toBe(404);
         expect(await response.json()).toEqual({ error: { code: "NOT_FOUND", message: "Route not found" } });
@@ -564,6 +647,146 @@ describe("API (Nest e2e)", () => {
       const text = await readSse(await fetch(`${base}/api/stream`), (t) => t.includes("event: status"));
 
       expect(text).toBe('retry: 5000\n\nevent: status\ndata: {"sources":{"pumpportal":"connecting","solanaLogs":"connecting"}}\n\n');
+    });
+  });
+
+  describe("token list, snapshots and stats", () => {
+    it("lists tokens from the history with their latest state and the total", async () => {
+      const { history, base } = await start();
+
+      const response = await fetch(`${base}/api/tokens`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        tokens: [
+          {
+            token: {
+              mint: MINT,
+              symbol: "MON",
+              name: "Monitoring",
+              creator: "dev",
+              metadataUri: "https://example.com/meta.json",
+              initialBuySol: 0.5,
+              marketCapSol: 28,
+              detectedAt: "2026-11-13T20:01:00.000Z",
+            },
+            status: "passed",
+            lifecycle: "active",
+            liquidity: { sol: 12.5, bondingCurvePct: 40.25, migrated: false },
+            lastPriceSol: 0.00000004,
+            lastMarketCapSol: 40,
+            peakMarketCapSol: 90,
+            maxScore: 63,
+            holders: 61,
+            lastTradeAt: "2026-11-13T20:30:00.000Z",
+            snapshotCount: 5,
+          },
+        ],
+        page: 1,
+        pageSize: 50,
+        total: 51,
+      });
+      expect(history.listQueries[0]).toMatchObject({ page: 1, pageSize: 50, sort: { field: "detectedAt", direction: "desc" } });
+    });
+
+    it("passes every filter through, with unencoded commas and colons", async () => {
+      const { history, base } = await start();
+
+      const response = await fetch(
+        `${base}/api/tokens?from=2026-11-01T05:00:00.000Z&to=2026-11-02T05:00:00.000Z&status=passed,pending&lifecycle=active&minScore=40&q=mon&sort=maxScore:desc&page=2&pageSize=500`,
+      );
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).pageSize).toBe(200);
+      expect(history.listQueries[0]).toMatchObject({
+        from: new Date("2026-11-01T05:00:00.000Z"),
+        to: new Date("2026-11-02T05:00:00.000Z"),
+        statuses: ["passed", "pending"],
+        lifecycle: "active",
+        minScore: 40,
+        search: "mon",
+        sort: { field: "maxScore", direction: "desc" },
+        page: 2,
+        pageSize: 200,
+      });
+    });
+
+    it("answers 400 INVALID_QUERY naming the parameter", async () => {
+      const { base } = await start();
+
+      const response = await fetch(`${base}/api/tokens?sort=price:desc`);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "INVALID_QUERY",
+          message: 'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
+        },
+      });
+    });
+
+    it("returns the snapshots of a token, oldest first", async () => {
+      const { base } = await start();
+
+      const response = await fetch(`${base}/api/tokens/${MINT}/snapshots`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        mint: MINT,
+        lifecycle: "active",
+        snapshots: [
+          {
+            milestone: "0m",
+            at: "2026-11-13T20:01:03.000Z",
+            priceSol: 0.00000003,
+            marketCapSol: 30,
+            volumeSol: 0.5,
+            buys: 1,
+            sells: 0,
+            uniqueBuyers: 1,
+            holders: null,
+            top10Pct: null,
+            devHoldsPct: null,
+            liquidity: { sol: 1.5, bondingCurvePct: 4.25, migrated: false },
+            source: "trades",
+          },
+        ],
+      });
+    });
+
+    it("answers 404 TOKEN_NOT_FOUND and 400 INVALID_MINT for snapshots like the token history", async () => {
+      const { base } = await start();
+
+      const unknown = await fetch(`${base}/api/tokens/11111111111111111111111111111111/snapshots`);
+      const malformed = await fetch(`${base}/api/tokens/not-a-mint/snapshots`);
+
+      expect(unknown.status).toBe(404);
+      expect((await unknown.json()).error.code).toBe("TOKEN_NOT_FOUND");
+      expect(malformed.status).toBe(400);
+      expect((await malformed.json()).error.code).toBe("INVALID_MINT");
+    });
+
+    it("returns the stats", async () => {
+      const { base } = await start();
+
+      expect(await (await fetch(`${base}/api/stats`)).json()).toEqual({
+        since: "2026-11-13T20:01:00.000Z",
+        tokens: { total: 3, active: 2, dead: 1, migrated: 1 },
+        screenings: { passed: 1, failed: 1, unverified: 0, pending: 1 },
+        trades: 40,
+        snapshots: 7,
+      });
+    });
+
+    it("answers 500 INTERNAL_ERROR when the list cannot be read", async () => {
+      const { history, base } = await start();
+      history.fail = true;
+
+      for (const path of ["/api/tokens", `/api/tokens/${MINT}/snapshots`, "/api/stats"]) {
+        const response = await fetch(`${base}${path}`);
+        expect(response.status, path).toBe(500);
+        expect((await response.json()).error.code).toBe("INTERNAL_ERROR");
+      }
     });
   });
 

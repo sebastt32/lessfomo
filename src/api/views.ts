@@ -6,7 +6,14 @@ import type {
   StoredToken,
   TokenHistory,
 } from "../history/domain/history-reader.js";
+import type {
+  HistoryStats,
+  TokenListEntry,
+  TokenSnapshots,
+} from "../history/domain/token-catalog-reader.js";
 import type { LiveEvent, LiveTrade, Mover } from "../live-feed/application/live-feed.js";
+import type { Liquidity } from "../momentum/domain/liquidity.js";
+import { PUMP_TOTAL_SUPPLY, type TokenSnapshot } from "../snapshots/domain/assemble-snapshot.js";
 import type { ScreeningResult } from "../screening/token-screener.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
 
@@ -27,6 +34,7 @@ export const storedScreeningView = (screening: StoredScreening) => ({
   ...screening,
   failureCodes: [...screening.failureCodes],
   evaluatedAt: screening.evaluatedAt.toISOString(),
+  detectedAt: screening.detectedAt?.toISOString() ?? null,
 });
 
 export const screeningResultView = (result: ScreeningResult, evaluatedAt: Date) => ({
@@ -40,6 +48,13 @@ export const screeningResultView = (result: ScreeningResult, evaluatedAt: Date) 
   creatorPct: result.report?.metrics.creatorPct ?? null,
   totalHolders: result.report?.metrics.totalHolders ?? null,
   evaluatedAt: evaluatedAt.toISOString(),
+  detectedAt: result.token.detectedAt.toISOString(),
+});
+
+export const liquidityView = (liquidity: Liquidity) => ({
+  sol: liquidity.sol,
+  bondingCurvePct: liquidity.bondingCurvePct,
+  migrated: liquidity.migrated,
 });
 
 export const moverView = (mover: Mover) => ({
@@ -51,6 +66,7 @@ export const moverView = (mover: Mover) => ({
   score: mover.snapshot.momentum.score,
   components: mover.snapshot.momentum.components,
   metrics: mover.snapshot.momentum.metrics,
+  liquidity: liquidityView(mover.liquidity),
 });
 
 export const momentumPointView = (point: StoredMomentumPoint) => ({
@@ -116,4 +132,51 @@ export const tradeView = ({ trade, isDev }: LiveTrade) => ({
   priceSol: trade.priceSol,
   isDev,
   time: unixSeconds(trade.timestamp),
+});
+
+const marketCapSol = (priceSol: number | null): number | null =>
+  priceSol === null ? null : Math.round(priceSol * PUMP_TOTAL_SUPPLY * 1e6) / 1e6;
+
+export const tokenListItemView = (entry: TokenListEntry) => ({
+  token: tokenView(entry.token),
+  status: entry.status,
+  lifecycle: entry.lifecycle,
+  liquidity: liquidityView(entry.liquidity),
+  lastPriceSol: entry.lastPriceSol,
+  lastMarketCapSol: marketCapSol(entry.lastPriceSol),
+  peakMarketCapSol: marketCapSol(entry.peakPriceSol),
+  maxScore: entry.maxScore,
+  holders: entry.holders,
+  lastTradeAt: entry.lastTradeAt?.toISOString() ?? null,
+  snapshotCount: entry.snapshotCount,
+});
+
+export const tokenSnapshotView = (snapshot: TokenSnapshot) => ({
+  milestone: snapshot.milestone,
+  at: snapshot.at.toISOString(),
+  priceSol: snapshot.priceSol,
+  marketCapSol: snapshot.marketCapSol,
+  volumeSol: snapshot.volumeSol,
+  buys: snapshot.buys,
+  sells: snapshot.sells,
+  uniqueBuyers: snapshot.uniqueBuyers,
+  holders: snapshot.holders,
+  top10Pct: snapshot.top10Pct,
+  devHoldsPct: snapshot.devHoldsPct,
+  liquidity: liquidityView(snapshot.liquidity),
+  source: snapshot.source,
+});
+
+export const tokenSnapshotsView = (mint: string, { lifecycle, snapshots }: TokenSnapshots) => ({
+  mint,
+  lifecycle,
+  snapshots: snapshots.map(tokenSnapshotView),
+});
+
+export const statsView = (stats: HistoryStats) => ({
+  since: stats.since?.toISOString() ?? null,
+  tokens: { ...stats.tokens },
+  screenings: { ...stats.screenings },
+  trades: stats.trades,
+  snapshots: stats.snapshots,
 });

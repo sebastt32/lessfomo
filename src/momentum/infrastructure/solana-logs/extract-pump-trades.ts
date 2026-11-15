@@ -1,6 +1,6 @@
 import { isObject, readString } from "../../../shared/json.js";
 import type { Trade } from "../../domain/trade.js";
-import { decodePumpTradeEvent } from "./decode-pump-trade-event.js";
+import { decodePumpCurveState, decodePumpTradeEvent } from "./decode-pump-trade-event.js";
 
 export const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
@@ -28,8 +28,11 @@ export const extractPumpTrades = (value: unknown): Trade[] => {
     } else if (RETURN.test(line)) {
       callStack.pop();
     } else if (line.startsWith(DATA_PREFIX) && callStack.at(-1) === PUMP_PROGRAM_ID) {
-      const trade = decodePumpTradeEvent(line.slice(DATA_PREFIX.length), signature);
-      if (trade !== null) trades.push(trade);
+      const data = line.slice(DATA_PREFIX.length);
+      const trade = decodePumpTradeEvent(data, signature);
+      if (trade === null) continue;
+      const curve = decodePumpCurveState(data);
+      trades.push(curve === null ? trade : { ...trade, curve });
     }
   }
   return trades;

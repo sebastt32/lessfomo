@@ -1,4 +1,5 @@
 import type { MomentumSnapshot } from "../../momentum/application/momentum-tracker.js";
+import { liquidityFromCurve, UNKNOWN_LIQUIDITY, type Liquidity } from "../../momentum/domain/liquidity.js";
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
@@ -11,6 +12,8 @@ export type SourceStatuses = Readonly<Record<SourceName, SourceStatus>>;
 export interface Mover {
   readonly token: NewToken;
   readonly status: SafetyStatus;
+  /** Latest liquidity seen in the token's trades. */
+  readonly liquidity: Liquidity;
   readonly snapshot: MomentumSnapshot;
 }
 
@@ -44,6 +47,7 @@ const notifyAll = <T>(listeners: Iterable<(value: T) => void>, value: T): void =
 interface TokenState {
   readonly token: NewToken;
   status: SafetyStatus;
+  liquidity: Liquidity;
 }
 
 /** Use case: in-memory view of what is happening right now, plus an event bus for live clients. */
@@ -57,7 +61,7 @@ export class LiveFeed {
   private sources: Record<SourceName, SourceStatus> = { pumpportal: "connecting", solanaLogs: "connecting" };
 
   tokenDetected(token: NewToken): void {
-    if (!this.tokens.has(token.mint)) this.tokens.set(token.mint, { token, status: "pending" });
+    if (!this.tokens.has(token.mint)) this.tokens.set(token.mint, { token, status: "pending", liquidity: UNKNOWN_LIQUIDITY });
     this.emit({ type: "token", token });
   }
 
@@ -71,7 +75,7 @@ export class LiveFeed {
     this.movers = snapshots
       .flatMap((snapshot) => {
         const state = this.tokens.get(snapshot.mint);
-        return state === undefined ? [] : [{ token: state.token, status: state.status, snapshot }];
+        return state === undefined ? [] : [{ token: state.token, status: state.status, liquidity: state.liquidity, snapshot }];
       })
       .sort((a, b) => b.snapshot.momentum.score - a.snapshot.momentum.score);
     this.moversAt = at;
@@ -90,8 +94,13 @@ export class LiveFeed {
     else if (message.startsWith("disconnected")) this.sourceStatusChanged(source, "disconnected");
   }
 
-  /** Publishes a stored trade to the subscribers of its token. */
+  /** Keeps the token's latest liquidity and publishes a stored trade to the subscribers of its token. */
   tradeRecorded(trade: Trade): void {
+    const state = this.tokens.get(trade.mint);
+    if (state !== undefined && trade.curve !== undefined) {
+      const liquidity = liquidityFromCurve(trade.curve);
+      state.liquidity = { ...liquidity, migrated: liquidity.migrated || state.liquidity.migrated };
+    }
     const listeners = this.tradeListeners.get(trade.mint);
     if (listeners === undefined) return;
     const creator = this.tokens.get(trade.mint)?.token.creator;

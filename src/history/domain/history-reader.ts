@@ -22,6 +22,8 @@ export interface StoredScreening {
   readonly creatorPct: number | null;
   readonly totalHolders: number | null;
   readonly evaluatedAt: Date;
+  /** Creation time of the token; null if the token itself was never stored. */
+  readonly detectedAt: Date | null;
 }
 
 export interface StoredMomentumPoint {

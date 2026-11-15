@@ -44,3 +44,9 @@ describe("extractPumpTrades", () => {
     expect(extractPumpTrades({ signature: "sig", err: null, logs: "nope" })).toEqual([]);
   });
 });
+
+describe("extractPumpTrades curve state", () => {
+  it("attaches the bonding curve state read from the same event", () => {
+    expect(extractPumpTrades(fixture)[0]?.curve).toEqual({ realSolReserves: 16.771318622, progressPct: 48.51, complete: false });
+  });
+});

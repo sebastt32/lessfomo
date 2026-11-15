@@ -13,6 +13,12 @@ export const SearchParam = createParamDecorator(
     new URL(context.switchToHttp().getRequest<Request>().originalUrl, "http://localhost").searchParams.get(name),
 );
 
+/** Every query parameter of the request. */
+export const SearchParams = createParamDecorator(
+  (_data: unknown, context: ExecutionContext): URLSearchParams =>
+    new URL(context.switchToHttp().getRequest<Request>().originalUrl, "http://localhost").searchParams,
+);
+
 /** Integers are clamped to 1..max (100 unless stated); anything else falls back to the default. */
 export class LimitPipe implements PipeTransform<string | null, number> {
   constructor(

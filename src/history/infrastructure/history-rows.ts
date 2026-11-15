@@ -18,10 +18,13 @@ import type {
 export type Row = Record<string, unknown>;
 export type SqlValue = string | number | null;
 
-const numberOrNull = (value: unknown): number | null =>
+export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value);
 
-const toDate = (value: unknown): Date => new Date(Number(value));
+export const toDate = (value: unknown): Date => new Date(Number(value));
+
+export const toDateOrNull = (value: unknown): Date | null =>
+  value === null || value === undefined ? null : toDate(value);
 
 export const toScreening = (row: Row): StoredScreening => ({
   mint: String(row["mint"]),
@@ -34,6 +37,7 @@ export const toScreening = (row: Row): StoredScreening => ({
   creatorPct: numberOrNull(row["creator_pct"]),
   totalHolders: numberOrNull(row["total_holders"]),
   evaluatedAt: toDate(row["evaluated_at"]),
+  detectedAt: toDateOrNull(row["token_detected_at"]),
 });
 
 export const toToken = (row: Row): StoredToken => ({
@@ -135,7 +139,7 @@ export const momentumValues = (snapshot: MomentumSnapshot): SqlValue[] => {
 };
 
 export const SCREENINGS_WITH_TOKEN = `
-  SELECT s.*, t.symbol, t.name FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint`;
+  SELECT s.*, t.symbol, t.name, t.detected_at AS token_detected_at FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint`;
 
 /**
  * Placeholder for the n-th (1-based) query parameter: `?n` in SQLite, `$n` in PostgreSQL.

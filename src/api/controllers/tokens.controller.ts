@@ -1,13 +1,15 @@
 import { Controller, Get, Inject, Param, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import type { HistoryReader } from "../../history/domain/history-reader.js";
-import { HISTORY_READER } from "../../history/history.module.js";
+import type { TokenCatalogReader } from "../../history/domain/token-catalog-reader.js";
+import { HISTORY_READER, TOKEN_CATALOG_READER } from "../../history/history.module.js";
 import type { SolUsdPrice } from "../../market-price/domain/sol-usd-price.js";
 import { SOL_USD_PRICE } from "../../market-price/market-price.module.js";
 import { ApiErrors } from "../http/api-error.js";
-import { LimitPipe, MintPipe, parseCandleInterval, SearchParam } from "../http/request-params.js";
+import { LimitPipe, MintPipe, parseCandleInterval, SearchParam, SearchParams } from "../http/request-params.js";
+import { parseTokenListQuery } from "../http/token-list-query.js";
 import { LiveStreams } from "../live-streams.js";
-import { candleView, devTradeView, tokenHistoryView } from "../views.js";
+import { candleView, devTradeView, tokenHistoryView, tokenListItemView, tokenSnapshotsView } from "../views.js";
 
 const DEFAULT_CANDLES_LIMIT = 300;
 const MAX_CANDLES_LIMIT = 1000;
@@ -19,9 +21,24 @@ const PUMP_TOTAL_SUPPLY = 1_000_000_000;
 export class TokensController {
   constructor(
     @Inject(HISTORY_READER) private readonly history: HistoryReader,
+    @Inject(TOKEN_CATALOG_READER) private readonly catalog: TokenCatalogReader,
     @Inject(SOL_USD_PRICE) private readonly solPrice: SolUsdPrice,
     @Inject(LiveStreams) private readonly streams: LiveStreams,
   ) {}
+
+  @Get("tokens")
+  async list(@SearchParams() params: URLSearchParams) {
+    const query = parseTokenListQuery(params, new Date());
+    const { tokens, total } = await this.catalog.listTokens(query);
+    return { tokens: tokens.map(tokenListItemView), page: query.page, pageSize: query.pageSize, total };
+  }
+
+  @Get("tokens/:mint/snapshots")
+  async snapshots(@Param("mint", MintPipe) mint: string) {
+    const snapshots = await this.catalog.tokenSnapshots(mint, new Date());
+    if (snapshots === null) throw ApiErrors.tokenNotFound();
+    return tokenSnapshotsView(mint, snapshots);
+  }
 
   @Get("tokens/:mint/candles")
   async candles(

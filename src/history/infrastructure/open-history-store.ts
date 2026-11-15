@@ -1,10 +1,12 @@
+import type { SnapshotStore } from "../../snapshots/domain/snapshot-store.js";
 import type { HistoryReader } from "../domain/history-reader.js";
 import type { HistoryRecorder } from "../domain/history-recorder.js";
+import type { TokenCatalogReader } from "../domain/token-catalog-reader.js";
 import { errorMessage } from "../../shared/error-message.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
-export interface History extends HistoryRecorder, HistoryReader {
+export interface History extends HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader {
   close(): Promise<void>;
 }
 

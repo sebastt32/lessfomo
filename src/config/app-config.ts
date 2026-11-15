@@ -28,6 +28,14 @@ export interface AppConfig {
     readonly rpcUrl: string | undefined;
     readonly wsUrl: string | undefined;
   };
+  readonly snapshots: {
+    /** How often due snapshots are taken. */
+    readonly tickIntervalMs: number;
+    /** Minimum time between two DexScreener requests (it allows 300 per minute). */
+    readonly dexMinIntervalMs: number;
+    /** Minimum time between two RugCheck reads for survivors, on top of the screener's own. */
+    readonly holderMinIntervalMs: number;
+  };
 }
 
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -68,5 +76,10 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
   solana: {
     rpcUrl: env["SOLANA_RPC_URL"] || undefined,
     wsUrl: env["SOLANA_WS_URL"] || undefined,
+  },
+  snapshots: {
+    tickIntervalMs: 5_000,
+    dexMinIntervalMs: 1_000,
+    holderMinIntervalMs: 15_000,
   },
 });

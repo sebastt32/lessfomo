@@ -1,4 +1,4 @@
-import type { TokenSafetySnapshot } from "./token-safety-snapshot.js";
+import type { HolderDistribution, TokenSafetySnapshot } from "./token-safety-snapshot.js";
 
 export type SafetyFailureCode =
   | "MINT_AUTHORITY_ACTIVE"
@@ -41,7 +41,16 @@ export interface SafetyReport {
   };
 }
 
-const roundPct = (value: number): number => Math.round(value * 100) / 100;
+export const roundPct = (value: number): number => Math.round(value * 100) / 100;
+
+/** Share of the supply held by the 10 largest wallets, from 0 to 100. */
+export const top10HoldersPct = (distribution: HolderDistribution): number =>
+  roundPct(
+    [...distribution.holders]
+      .sort((a, b) => b.pct - a.pct)
+      .slice(0, 10)
+      .reduce((total, holder) => total + holder.pct, 0),
+  );
 
 /** Applies every safety rule and reports all failures, not just the first one. */
 export const evaluateTokenSafety = (
@@ -51,12 +60,7 @@ export const evaluateTokenSafety = (
   const { authorities, distribution } = snapshot;
   const failures: SafetyFailure[] = [];
 
-  const top10Pct = roundPct(
-    [...distribution.holders]
-      .sort((a, b) => b.pct - a.pct)
-      .slice(0, 10)
-      .reduce((total, holder) => total + holder.pct, 0),
-  );
+  const top10Pct = top10HoldersPct(distribution);
   const creatorPct = roundPct(distribution.creatorPct);
 
   if (authorities.mintAuthority !== null) {

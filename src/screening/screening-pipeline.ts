@@ -17,6 +17,8 @@ import {
   SAFETY_THRESHOLDS,
 } from "../safety-checks/safety-checks.module.js";
 import { errorMessage } from "../shared/error-message.js";
+import type { SnapshotScheduler } from "../snapshots/application/snapshot-scheduler.js";
+import { SNAPSHOT_SCHEDULER } from "../snapshots/snapshots.module.js";
 import type { NewTokenSource } from "../token-discovery/domain/new-token-source.js";
 import { NEW_TOKEN_SOURCE } from "../token-discovery/token-discovery.module.js";
 import { formatMover, formatScreening } from "./console-report.js";
@@ -54,6 +56,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
     @Inject(MINT_AUTHORITY_READER) authorityReader: MintAuthorityReader,
     @Inject(HOLDER_DISTRIBUTION_READER) distributionReader: HolderDistributionReader,
     @Inject(SAFETY_THRESHOLDS) thresholds: SafetyThresholds,
+    @Inject(SNAPSHOT_SCHEDULER) private readonly snapshots: SnapshotScheduler,
   ) {
     /** Feeds every new token to the live feed, the history and the momentum tracker before screening it. */
     const observedTokens: NewTokenSource = {
@@ -61,6 +64,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
         tokens.start((token) => {
           tracker.track(token, token.detectedAt);
           safely("history", () => recorder.recordToken(token));
+          snapshots.tokenDetected(token);
           feed.tokenDetected(token);
           onToken(token);
         }),
@@ -90,7 +94,9 @@ export class ScreeningPipeline implements OnModuleDestroy {
     if (this.momentumTimer !== null) return;
     this.screener.start();
     this.solPrice.start();
+    this.snapshots.start();
     this.tradeSource.start((trade) => {
+      this.snapshots.tradeObserved(trade);
       if (!this.tracker.record(trade)) return;
       safely("history", () => this.recorder.recordTrade(trade));
       this.feed.tradeRecorded(trade);
@@ -98,14 +104,15 @@ export class ScreeningPipeline implements OnModuleDestroy {
     this.momentumTimer = setInterval(() => this.reportMomentum(), this.config.momentum.reportIntervalMs);
   }
 
-  /** Stops the timer, then the SOL price, trade and token sources, in that order. */
-  onModuleDestroy(): void {
+  /** Stops the timer, then the SOL price, trade and token sources, in that order, then the snapshots. */
+  async onModuleDestroy(): Promise<void> {
     if (this.momentumTimer === null) return;
     clearInterval(this.momentumTimer);
     this.momentumTimer = null;
     this.solPrice.stop();
     this.tradeSource.stop();
     this.screener.stop();
+    await this.snapshots.stop();
   }
 
   /** Records and publishes momentum of active tokens, then prints the top movers. */

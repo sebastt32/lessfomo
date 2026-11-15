@@ -3,8 +3,55 @@ import type { MomentumSnapshot } from "../../../momentum/application/momentum-tr
 import type { Trade } from "../../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../../screening/token-screener.js";
 import type { NewToken } from "../../../token-discovery/domain/new-token.js";
+import type { TokenSnapshot, TradeWindow } from "../../../snapshots/domain/assemble-snapshot.js";
+import type {
+  DueToken,
+  MarketUpdate,
+  SnapshotHolders,
+  SnapshotStateChange,
+  SnapshotStore,
+  WatchedToken,
+} from "../../../snapshots/domain/snapshot-store.js";
 import type { HistoryReader, StoredScreening, TokenChart, TokenHistory } from "../../domain/history-reader.js";
 import type { HistoryRecorder } from "../../domain/history-recorder.js";
+import type {
+  HistoryStats,
+  TokenCatalogReader,
+  TokenList,
+  TokenListQuery,
+  TokenSnapshots,
+} from "../../domain/token-catalog-reader.js";
+import {
+  backfillTokenStateSql,
+  dueTokensStatement,
+  lastPriceSql,
+  lifecycleOf,
+  markDeadStatement,
+  marketUpdateStatement,
+  maxScoreStatement,
+  saveSnapshotStatements,
+  scheduleNewTokenStatement,
+  screeningStateStatement,
+  snapshotHoldersStatements,
+  statsStatement,
+  tokenLifecycleStatement,
+  tokenListStatements,
+  tokenSnapshotsDdl,
+  tokenSnapshotsSql,
+  tokenStateDdl,
+  toDueToken,
+  toStats,
+  toTokenListEntry,
+  toTokenSnapshot,
+  toTradeWindow,
+  toWatchedToken,
+  tradeWindowParams,
+  tradeWindowSql,
+  watchedTokensStatement,
+  type CatalogDialect,
+  type SqlType,
+  type Statement,
+} from "../catalog-sql.js";
 import {
   candlesSql,
   devTradesSql,
@@ -85,6 +132,8 @@ CREATE TABLE IF NOT EXISTS momentum_snapshots (
   PRIMARY KEY (mint, at)
 );
 CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
+${tokenStateDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
+${tokenSnapshotsDdl({ id: "BIGSERIAL PRIMARY KEY", real: "DOUBLE PRECISION", time: "BIGINT" })}
 `;
 
 /** Serializes concurrent migrations (e.g. two containers starting during a redeploy). */
@@ -123,6 +172,13 @@ const UPSERT_MOMENTUM = `INSERT INTO momentum_snapshots (${MOMENTUM_COLUMNS.join
 
 /** `ctid` follows insertion order in this append-only table (rows are never updated or deleted). */
 const CHART_DIALECT: ChartDialect = { param: (index) => `$${index}`, sequence: "ctid" };
+const POSTGRES_TYPES: Readonly<Record<SqlType, string>> = {
+  real: "double precision",
+  bigint: "bigint",
+  integer: "integer",
+  text: "text",
+};
+const CATALOG_DIALECT: CatalogDialect = { ...CHART_DIALECT, typed: (index, type) => `$${index}::${POSTGRES_TYPES[type]}` };
 
 export interface PostgresHistoryOptions {
   /** Called when an idle pooled connection fails (e.g. the server restarts); without it such errors are ignored. */
@@ -130,7 +186,7 @@ export interface PostgresHistoryOptions {
 }
 
 /** Stores and reads history in PostgreSQL. Every query is parameterized. */
-export class PostgresHistory implements HistoryRecorder, HistoryReader {
+export class PostgresHistory implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader {
   private constructor(private readonly pool: pg.Pool) {}
 
   /** Connects and creates the schema if it does not exist yet. Rejects if the server is unreachable. */
@@ -151,6 +207,7 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
         await client.query("BEGIN");
         await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_ID]);
         await client.query(SCHEMA);
+        await client.query(backfillTokenStateSql(CHART_DIALECT));
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
@@ -166,11 +223,18 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
   }
 
   async recordToken(token: NewToken): Promise<void> {
-    await this.pool.query(INSERT_TOKEN, tokenValues(token));
+    await this.transaction([
+      { sql: INSERT_TOKEN, params: tokenValues(token) },
+      scheduleNewTokenStatement(CATALOG_DIALECT, token.mint, token.detectedAt),
+    ]);
   }
 
   async recordScreening(result: ScreeningResult, evaluatedAt: Date): Promise<void> {
-    await this.pool.query(INSERT_SCREENING, screeningValues(result, evaluatedAt));
+    const holders = result.report?.metrics.totalHolders ?? null;
+    await this.transaction([
+      { sql: INSERT_SCREENING, params: screeningValues(result, evaluatedAt) },
+      screeningStateStatement(CATALOG_DIALECT, result.token.mint, result.status, holders),
+    ]);
   }
 
   async recordTrade(trade: Trade): Promise<void> {
@@ -178,7 +242,10 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
   }
 
   async recordMomentum(snapshot: MomentumSnapshot): Promise<void> {
-    await this.pool.query(UPSERT_MOMENTUM, momentumValues(snapshot));
+    await this.transaction([
+      { sql: UPSERT_MOMENTUM, params: momentumValues(snapshot) },
+      maxScoreStatement(CATALOG_DIALECT, snapshot.mint, snapshot.momentum.score),
+    ]);
   }
 
   async recentScreenings(limit: number): Promise<StoredScreening[]> {
@@ -213,6 +280,56 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
     return { candles: candleRows.map(toCandle), devTrades: devRows.map(toDevTrade) };
   }
 
+  async listTokens(query: TokenListQuery): Promise<TokenList> {
+    const { list, count } = tokenListStatements(CATALOG_DIALECT, query);
+    const [rows, counted] = await Promise.all([this.rows(list), this.rows(count)]);
+    return { tokens: rows.map(toTokenListEntry), total: Number(counted[0]?.["n"] ?? 0) };
+  }
+
+  async tokenSnapshots(mint: string, now: Date): Promise<TokenSnapshots | null> {
+    const [token] = await this.rows(tokenLifecycleStatement(CATALOG_DIALECT, mint, now));
+    if (token === undefined) return null;
+    const snapshots = await this.query(tokenSnapshotsSql(CHART_DIALECT), mint);
+    return { lifecycle: lifecycleOf(token), snapshots: snapshots.map(toTokenSnapshot) };
+  }
+
+  async stats(now: Date): Promise<HistoryStats> {
+    return toStats((await this.rows(statsStatement(CATALOG_DIALECT, now)))[0]);
+  }
+
+  async dueTokens(now: Date, limit: number): Promise<DueToken[]> {
+    return (await this.rows(dueTokensStatement(CATALOG_DIALECT, now, limit))).map(toDueToken);
+  }
+
+  async watchedTokens(since: Date, limit: number): Promise<WatchedToken[]> {
+    return (await this.rows(watchedTokensStatement(CATALOG_DIALECT, since, limit))).map(toWatchedToken);
+  }
+
+  async tradeWindow(mint: string, after: Date | null, upTo: Date): Promise<TradeWindow> {
+    const [totals, price] = await Promise.all([
+      this.query(tradeWindowSql(CHART_DIALECT), ...tradeWindowParams(mint, after, upTo)),
+      this.query(lastPriceSql(CHART_DIALECT), mint, upTo.getTime()),
+    ]);
+    return toTradeWindow(totals[0], price[0]);
+  }
+
+  async saveSnapshot(snapshot: TokenSnapshot, change: SnapshotStateChange): Promise<void> {
+    await this.transaction(saveSnapshotStatements(CATALOG_DIALECT, snapshot, change));
+  }
+
+  async markDead(mint: string): Promise<void> {
+    await this.rows(markDeadStatement(CATALOG_DIALECT, mint));
+  }
+
+  async updateMarkets(updates: readonly MarketUpdate[]): Promise<void> {
+    if (updates.length === 0) return;
+    await this.transaction(updates.map((update) => marketUpdateStatement(CATALOG_DIALECT, update)));
+  }
+
+  async addSnapshotHolders(mint: string, milestone: string, at: Date, holders: SnapshotHolders): Promise<void> {
+    await this.transaction(snapshotHoldersStatements(CATALOG_DIALECT, mint, milestone, at, holders));
+  }
+
   /**
    * Runs a parameterized query (`$1`, `$2`, ...) and returns plain rows; intended for analysis
    * scripts and tests. BIGINT columns (timestamps, ids) come back as strings.
@@ -224,5 +341,24 @@ export class PostgresHistory implements HistoryRecorder, HistoryReader {
 
   async close(): Promise<void> {
     await this.pool.end();
+  }
+
+  private rows(statement: Statement): Promise<Row[]> {
+    return this.query(statement.sql, ...statement.params);
+  }
+
+  /** Runs the statements in order in one transaction on one pooled connection. */
+  private async transaction(statements: readonly Statement[]): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const statement of statements) await client.query(statement.sql, statement.params);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

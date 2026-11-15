@@ -14,6 +14,7 @@ import { SOL_PRICE_FEED } from "./market-price/market-price.module.js";
 import type { Trade } from "./momentum/domain/trade.js";
 import { TRADE_SOURCE } from "./momentum/momentum.module.js";
 import { HOLDER_DISTRIBUTION_READER, MINT_AUTHORITY_READER } from "./safety-checks/safety-checks.module.js";
+import { MARKET_DATA_SOURCE } from "./snapshots/snapshots.module.js";
 import type { NewToken } from "./token-discovery/domain/new-token.js";
 import { NEW_TOKEN_SOURCE } from "./token-discovery/token-discovery.module.js";
 
@@ -84,6 +85,9 @@ class FakeHistory {
   recentScreenings = async () => [];
   tokenHistory = async () => null;
   tokenChart = async () => null;
+  watchedTokens = async () => [];
+  dueTokens = async () => [];
+  updateMarkets = async (): Promise<void> => undefined;
   close = async (): Promise<void> => {
     this.onClose();
     events.push("history.close");
@@ -136,6 +140,8 @@ const boot = async (config: AppConfig) => {
     .useValue({ read: async () => null })
     .overrideProvider(HISTORY_STORE)
     .useValue({ history, description: "fake store" })
+    .overrideProvider(MARKET_DATA_SOURCE)
+    .useValue({ quotes: async () => new Map() })
     .compile();
   app = moduleRef.createNestApplication(createApiHttpAdapter(), API_APPLICATION_OPTIONS);
   await runLessfomo(app, config);
