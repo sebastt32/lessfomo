@@ -45,6 +45,7 @@ interface ScreeningView {
   creatorPct: number | null;
   totalHolders: number | null;
   evaluatedAt: string;
+  detectedAt: string | null;      // the token's creation time; null if unknown
 }
 
 interface MomentumComponents {
@@ -237,7 +238,7 @@ Every token ever detected, from the database, newest first by default.
 
 | Param | Default | Description |
 | --- | --- | --- |
-| `from`, `to` | none | ISO dates (inclusive `from`, exclusive `to`) on `detectedAt`; e.g. a day, a month or a year |
+| `from`, `to` | none | ISO 8601 date or date-time (inclusive `from`, exclusive `to`) on `detectedAt`; clients send full instants at their local midnight, e.g. `2026-11-01T05:00:00.000Z` |
 | `status` | all | `passed`, `failed`, `unverified`, `pending` (comma-separated allowed) |
 | `lifecycle` | all | `active` or `dead` |
 | `minScore` | none | Only tokens whose `maxScore` is at least this (0-100) |
