@@ -144,6 +144,28 @@ Solana RPC logs (trades) ─┴─→ momentum tracker (every minute) ───�
                                                                     └─→ live feed → HTTP + SSE API
 ```
 
+## Architecture
+
+[NestJS](https://nestjs.com) (Express platform) organizes the edge; the domain under each
+`src/<capability>/domain` stays plain TypeScript without decorators. Each capability has one
+Nest module whose ports are injection tokens (always injected with an explicit `@Inject(TOKEN)`,
+because `tsx` and Vitest do not emit decorator metadata):
+
+| Module | Provides |
+| --- | --- |
+| `TokenDiscoveryModule` | `NEW_TOKEN_SOURCE` (PumpPortal) |
+| `SafetyChecksModule` | `MINT_AUTHORITY_READER`, `HOLDER_DISTRIBUTION_READER`, `SAFETY_THRESHOLDS` |
+| `MomentumModule` | `MOMENTUM_TRACKER`, `TRADE_SOURCE` (Solana logs) |
+| `HistoryModule` | `HISTORY_STORE`, `HISTORY_READER`, `HISTORY_RECORDER` (PostgreSQL or SQLite) |
+| `LiveFeedModule` | `LIVE_FEED` |
+| `MarketPriceModule` | `SOL_PRICE_FEED`, `SOL_USD_PRICE` |
+| `ScreeningModule` | `ScreeningPipeline`, which wires the sources to the screener, history and feed |
+| `ApiModule` | Controllers, CORS/method middleware, error filter and SSE streams of `docs/API.md` |
+
+`src/main.ts` reads the environment once (`src/config/app-config.ts`), starts the API and then
+the pipeline. If the API cannot start, the screener keeps running. On `SIGINT`/`SIGTERM` it stops
+the pipeline, then the API and its streams, then closes the history, and exits with code 0.
+
 ## Docker
 
 The `Dockerfile` builds a production image that runs `node dist/main.js` as the non-root

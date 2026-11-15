@@ -1,17 +1,23 @@
-import { connect, type AddressInfo } from "node:net";
+import type { AddressInfo } from "node:net";
+import { connect } from "node:net";
+import type { INestApplication } from "@nestjs/common";
+import { Test } from "@nestjs/testing";
 import { afterEach, describe, expect, it } from "vitest";
-import type {
-  HistoryReader,
-  StoredScreening,
-  TokenChart,
-  TokenHistory,
-} from "../../history/domain/history-reader.js";
-import { LiveFeed } from "../../live-feed/application/live-feed.js";
-import type { SolUsdListener, SolUsdPrice } from "../../market-price/domain/sol-usd-price.js";
-import type { MomentumSnapshot } from "../../momentum/application/momentum-tracker.js";
-import type { Trade } from "../../momentum/domain/trade.js";
-import type { NewToken } from "../../token-discovery/domain/new-token.js";
-import { startApiServer, type ApiServer } from "./api-server.js";
+import { loadAppConfig, type AppConfig } from "../config/app-config.js";
+import { ConfigModule } from "../config/config.module.js";
+import type { HistoryReader, StoredScreening, TokenChart, TokenHistory } from "../history/domain/history-reader.js";
+import { HISTORY_STORE } from "../history/history.module.js";
+import { LiveFeed } from "../live-feed/application/live-feed.js";
+import { LIVE_FEED } from "../live-feed/live-feed.module.js";
+import type { SolUsdListener, SolUsdPrice } from "../market-price/domain/sol-usd-price.js";
+import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
+import type { MomentumSnapshot } from "../momentum/application/momentum-tracker.js";
+import type { Trade } from "../momentum/domain/trade.js";
+import type { NewToken } from "../token-discovery/domain/new-token.js";
+import { ApiModule } from "./api.module.js";
+import { API_ERROR_REPORTER } from "./http/api-exception.filter.js";
+import { API_APPLICATION_OPTIONS, createApiHttpAdapter } from "./http/api-http-adapter.js";
+import { LiveStreams } from "./live-streams.js";
 
 const MINT = "E3rpattxgipu5MoxktjsXHwEaYVfmowta9tnCp6bpump";
 const STARTED_AT = new Date("2026-11-13T20:00:00.000Z");
@@ -109,6 +115,7 @@ const trade = (overrides: Partial<Trade> = {}): Trade => ({
 });
 
 class FakeHistory implements HistoryReader {
+  closed = false;
   requestedLimits: number[] = [];
   chartRequests: { mint: string; intervalSeconds: number; limit: number }[] = [];
   fail = false;
@@ -141,32 +148,57 @@ class FakeHistory implements HistoryReader {
     this.chartRequests.push({ mint, intervalSeconds, limit });
     return mint === MINT ? chart : null;
   }
+  async close(): Promise<void> {
+    this.closed = true;
+  }
 }
 
-let server: ApiServer | null = null;
+let app: INestApplication | null = null;
 
+const configWith = (overrides: { heartbeatMs?: number }): AppConfig => {
+  const config = loadAppConfig({}, STARTED_AT);
+  return { ...config, api: { ...config.api, ...overrides } };
+};
+
+/** The Nest API on a free port, with a real LiveFeed and fake history and SOL/USD price. */
 const start = async (options: { heartbeatMs?: number } = {}) => {
   const feed = new LiveFeed();
   const history = new FakeHistory();
   const solPrice = new FakeSolPrice();
-  server = await startApiServer({
-    host: "127.0.0.1",
-    port: 0,
-    feed,
-    history,
-    solPrice,
-    corsOrigins: ["http://localhost:5173"],
-    startedAt: STARTED_AT,
-    ...options,
-  });
-  const { port } = server.address() as AddressInfo;
-  return { feed, history, solPrice, base: `http://127.0.0.1:${port}` };
+  const reported: unknown[] = [];
+  const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(configWith(options)), ApiModule] })
+    .overrideProvider(LIVE_FEED)
+    .useValue(feed)
+    .overrideProvider(HISTORY_STORE)
+    .useValue({ history, description: "fake" })
+    .overrideProvider(SOL_USD_PRICE)
+    .useValue(solPrice)
+    .overrideProvider(API_ERROR_REPORTER)
+    .useValue((error: unknown) => reported.push(error))
+    .compile();
+  app = moduleRef.createNestApplication(createApiHttpAdapter(), API_APPLICATION_OPTIONS);
+  await app.listen(0, "127.0.0.1");
+  const { port } = app.getHttpServer().address() as AddressInfo;
+  return { feed, history, solPrice, reported, base: `http://127.0.0.1:${port}` };
 };
 
+const streamCount = (): number | undefined => app?.get(LiveStreams).count();
+
 afterEach(async () => {
-  await server?.close();
-  server = null;
+  await app?.close();
+  app = null;
 });
+
+/** Sends raw bytes and returns the whole HTTP response, for targets `fetch` would normalize or reject. */
+const rawRequest = (base: string, head: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const { port } = new URL(base);
+    const socket = connect(Number(port), "127.0.0.1", () => socket.write(`${head}\r\nHost: localhost\r\nConnection: close\r\n\r\n`));
+    let raw = "";
+    socket.on("data", (chunk) => (raw += chunk.toString()));
+    socket.on("end", () => resolve(raw));
+    socket.on("error", reject);
+  });
 
 const readSse = async (response: Response, until: (text: string) => boolean): Promise<string> => {
   const reader = response.body!.getReader();
@@ -181,7 +213,7 @@ const readSse = async (response: Response, until: (text: string) => boolean): Pr
   return text;
 };
 
-describe("API server", () => {
+describe("API (Nest e2e)", () => {
   it("reports health with source statuses", async () => {
     const { feed, base } = await start();
     feed.sourceStatusChanged("pumpportal", "connected");
@@ -296,19 +328,11 @@ describe("API server", () => {
 
   it("answers 400 BAD_REQUEST for a request target that is not a valid URL", async () => {
     const { base } = await start();
-    const { port } = new URL(base);
 
-    const statusLine = await new Promise<string>((resolve, reject) => {
-      const socket = connect(Number(port), "127.0.0.1", () => {
-        socket.write("GET http://[::1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-      });
-      let raw = "";
-      socket.on("data", (chunk) => (raw += chunk.toString()));
-      socket.on("end", () => resolve(raw.split("\r\n")[0] ?? ""));
-      socket.on("error", reject);
-    });
+    const raw = await rawRequest(base, "GET http://[::1 HTTP/1.1");
 
-    expect(statusLine).toBe("HTTP/1.1 400 Bad Request");
+    expect(raw.split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    expect(raw).toContain('{"error":{"code":"BAD_REQUEST","message":"Request target is not a valid URL"}}');
   });
 
   it("closes cleanly even if events arrive while streams are closing", async () => {
@@ -317,12 +341,12 @@ describe("API server", () => {
     const reader = response.body!.getReader();
     await reader.read();
 
-    const closing = server!.close();
+    const closing = app!.close();
     feed.tokenDetected(token);
     feed.sourceStatusChanged("solanaLogs", "connected");
     await closing;
     await new Promise((resolve) => setTimeout(resolve, 10));
-    server = null;
+    app = null;
 
     expect(() => feed.tokenDetected(token)).not.toThrow();
   });
@@ -451,7 +475,96 @@ describe("API server", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(() => feed.tokenDetected(token)).not.toThrow();
-    expect(server?.streamCount()).toBe(0);
+    expect(streamCount()).toBe(0);
+  });
+
+  describe("routing exactly as before the Nest migration", () => {
+    it("matches paths case-sensitively and without a trailing slash", async () => {
+      const { base } = await start();
+
+      for (const path of ["/api/health/", "/API/health", "/api/movers/", "/api/tokens", "/"]) {
+        const response = await fetch(`${base}${path}`);
+        expect(response.status, path).toBe(404);
+        expect(await response.json()).toEqual({ error: { code: "NOT_FOUND", message: "Route not found" } });
+      }
+      const empty = await fetch(`${base}/api/tokens/`);
+      expect(empty.status).toBe(400);
+      expect((await empty.json()).error.code).toBe("INVALID_MINT");
+    });
+
+    it("resolves dot segments and absolute-form targets like a URL", async () => {
+      const { base } = await start();
+
+      for (const head of ["GET /api/x/../health HTTP/1.1", "GET http://example.com/api/health HTTP/1.1"]) {
+        const raw = await rawRequest(base, head);
+        expect(raw.split("\r\n")[0], head).toBe("HTTP/1.1 200 OK");
+        expect(raw).toContain('"status":"ok"');
+      }
+    });
+
+    it("answers 405 for HEAD and a 204 preflight on any path", async () => {
+      const { base } = await start();
+
+      const head = await fetch(`${base}/api/health`, { method: "HEAD" });
+      const preflight = await fetch(`${base}/api/nope`, { method: "OPTIONS", headers: { origin: "https://evil.example" } });
+
+      expect(head.status).toBe(405);
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+      expect(preflight.headers.get("access-control-max-age")).toBe("600");
+      expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    });
+
+    it("reads the first of repeated query parameters", async () => {
+      const { history, base } = await start();
+
+      await fetch(`${base}/api/screenings?limit=5&limit=7`);
+      await fetch(`${base}/api/tokens/${MINT}/candles?interval=5m&interval=1s`);
+
+      expect(history.requestedLimits).toEqual([5]);
+      expect(history.chartRequests.map((r) => r.intervalSeconds)).toEqual([300]);
+    });
+
+    it("answers 400 INVALID_MINT for broken percent-encoding under a token", async () => {
+      const { base } = await start();
+
+      for (const path of ["/api/tokens/%/candles", "/api/tokens/%E0%A4%A/stream", "/api/tokens/%/x/y"]) {
+        const response = await fetch(`${base}${path}`);
+        expect(response.status, path).toBe(400);
+        expect((await response.json()).error.code).toBe("INVALID_MINT");
+      }
+    });
+
+    it("sends JSON with CORS headers and no framework headers, errors included", async () => {
+      const { base } = await start();
+
+      for (const path of ["/api/health", "/api/nope"]) {
+        const response = await fetch(`${base}${path}`, { headers: { origin: "http://localhost:5173" } });
+        expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+        expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+        expect(response.headers.get("vary")).toBe("Origin");
+        expect(response.headers.get("x-powered-by")).toBeNull();
+        expect(response.headers.get("etag")).toBeNull();
+      }
+    });
+
+    it("reports the cause of a 500 without sending it", async () => {
+      const { history, reported, base } = await start();
+      history.fail = true;
+
+      await fetch(`${base}/api/screenings`);
+
+      expect(reported).toHaveLength(1);
+      expect((reported[0] as Error).message).toBe("disk on fire");
+    });
+
+    it("starts the feed stream with exactly the retry hint and the status event", async () => {
+      const { base } = await start();
+
+      const text = await readSse(await fetch(`${base}/api/stream`), (t) => t.includes("event: status"));
+
+      expect(text).toBe('retry: 5000\n\nevent: status\ndata: {"sources":{"pumpportal":"connecting","solanaLogs":"connecting"}}\n\n');
+    });
   });
 
   describe("token candles", () => {
@@ -650,7 +763,7 @@ describe("API server", () => {
 
       expect(feed.tradeSubscriptionCount()).toBe(0);
       expect(solPrice.listeners.size).toBe(0);
-      expect(server?.streamCount()).toBe(0);
+      expect(streamCount()).toBe(0);
       expect(() => feed.tradeRecorded(trade())).not.toThrow();
     });
 
@@ -659,8 +772,8 @@ describe("API server", () => {
       const response = await fetch(`${base}/api/tokens/${MINT}/stream`);
       await response.body!.getReader().read();
 
-      await server!.close();
-      server = null;
+      await app!.close();
+      app = null;
 
       expect(feed.tradeSubscriptionCount()).toBe(0);
       expect(solPrice.listeners.size).toBe(0);
