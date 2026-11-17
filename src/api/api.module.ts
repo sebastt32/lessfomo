@@ -6,6 +6,7 @@ import { HistoryModule } from "../history/history.module.js";
 import { LiveFeedModule } from "../live-feed/live-feed.module.js";
 import { MarketPriceModule } from "../market-price/market-price.module.js";
 import { errorMessage } from "../shared/error-message.js";
+import { TokenCycleModule } from "../token-cycle/token-cycle.module.js";
 import { WalletReputationModule } from "../wallet-reputation/wallet-reputation.module.js";
 import { AnalysisController } from "./controllers/analysis.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -22,7 +23,7 @@ import { TokenVisibility } from "./token-visibility.js";
 
 /** The HTTP + SSE API described in docs/API.md: read-only, behind the sign-in of `AuthModule`. */
 @Module({
-  imports: [LiveFeedModule, HistoryModule, MarketPriceModule, WalletReputationModule, AuthModule],
+  imports: [LiveFeedModule, HistoryModule, MarketPriceModule, WalletReputationModule, TokenCycleModule, AuthModule],
   controllers: [
     HealthController,
     MoversController,

@@ -135,7 +135,7 @@ interface MomentumPoint {
 
 type SourceStatus = "connecting" | "connected" | "disconnected";
 
-type CandleInterval = "1s" | "1m" | "5m";
+type CandleInterval = "1s" | "1m" | "5m" | "15m" | "1h";
 
 interface Candle {
   time: number;                   // bucket start, Unix seconds (UTC)
@@ -312,8 +312,8 @@ mint is not a base58 address.
 ### `GET /api/tokens/:mint/candles?interval=1m&limit=300`
 
 OHLCV candles built from every stored trade of the token, oldest first. Buckets without
-trades are omitted. `interval` defaults to `1m`; any other value than `1s`, `1m`, `5m` →
-`400 INVALID_INTERVAL`. `limit` keeps the most recent N candles, default `300`, clamped to `1..1000`.
+trades are omitted. `interval` defaults to `1m`; any other value than `1s`, `1m`, `5m`, `15m`, `1h` →
+`400 INVALID_INTERVAL`. `limit` keeps the most recent N candles, default `300`, clamped to `1..2000`.
 Same `INVALID_MINT` / `TOKEN_NOT_FOUND` errors as `/api/tokens/:mint`.
 
 ```json
@@ -330,7 +330,7 @@ valid mint is accepted (the token may appear later).
 
 | Event | `data` | When |
 | --- | --- | --- |
-| `trade` | `TradeView` | Every trade of this token, as it happens |
+| `trade` | `TradeView` | Every stored trade of this token, as it happens (for 24 hours from its creation, see "Token cycle") |
 | `sol-price` | `{ "solUsd": number }` | Once right after connecting (if known), then whenever it changes |
 
 Heartbeat `: ping` every 15 seconds, like `/api/stream`.
@@ -387,6 +387,21 @@ interface TokenCycle {
 }
 ```
 
+Details of the rules:
+
+- Trades at or before `appearedAt` (trade times have one-second resolution) only set `launchPriceSol`,
+  `appearedPriceSol` and `appearedLate`; the explosion, run-up, peak and crash come from later trades only.
+  A late token still gets a phase, peak and crash from its base price; its `investWindowSeconds` stays
+  negative (`0` when it reached 2× in the very second it appeared, so check `appearedLate` too).
+- The peak is the maximum between the explosion and the crash. Once `crashed`, the cycle is complete:
+  `peakAt`, `peakX` and `crashAt` no longer change; only `lastPriceX` and `maxDrawdownPct` (the fall
+  from that peak) keep moving.
+- After the 24 hours of trade-by-trade data, the cycle continues from the prices of the token's
+  snapshots (coarser). A snapshot price only counts when the token had no stored trade in the 2
+  minutes before it.
+- A token without a cycle yet (it just became public, or the startup backfill has not reached it) has `cycle: null`.
+- Ratios (`*X`) are rounded to 4 decimals, `maxDrawdownPct` to 2.
+
 `Mover`, `TokenListItem` and `ScreeningView` gain `cycle: TokenCycle | null`, and `GET /api/tokens/:mint` gains a
 top-level `cycle`. `GET /api/tokens` accepts `phase` (comma-separated `stable`, `exploding`, `crashed`),
 `appearedLate` (`true`/`false`) and the sort fields `appearedAt` and `investWindow`. Candles accept
@@ -408,7 +423,16 @@ Aggregates over tokens that appeared in the range (default: last 7 days). No per
                        "medianPeakX": 0 } ] }
 ```
 
-Statistics are `null` when there are no tokens to compute them from.
+Statistics are `null` when there are no tokens to compute them from. `appearedInTimePct` +
+`appearedLatePct` and `explodedPct` + `neverExplodedPct` each add up to 100; they and `crashedPct` are
+shares of `tokens`. `medianInvestWindowSeconds` is over tokens that appeared in time and exploded;
+`medianPeakX` and `medianSecondsToPeak` (from appearing to the peak) over tokens that exploded;
+`medianSecondsPeakToCrash` over tokens that crashed. `windowBuckets` always lists the six labels in
+that order: `late` holds every token that appeared late; the others hold tokens that appeared in time
+and exploded, by `investWindowSeconds` (`<1m`: under 60 s, `1-5m`: 60 to under 300, `5-15m`: 300 to
+under 900, `15-60m`: 900 to under 3600, `>1h`: 3600 or more); a bucket's `medianPeakX` is over its
+tokens that exploded. In-time tokens that never exploded are in no bucket. It is aggregate-only and
+computed over every stored cycle, like `/api/analysis/smart-wallets`.
 
 ### Public visibility rule
 
@@ -416,7 +440,7 @@ The public API only exposes tokens that have **at least `PUBLIC_MIN_CONVICTION_W
 conviction wallets**: good-or-elite wallets whose point-in-time style at entry was `conviction`.
 Flippers and mixed wallets are shown in token details but never make a token public. Every token-level endpoint and event applies it: `/api/movers`, `/api/screenings`,
 `/api/tokens` (list), `/api/tokens/:mint`, `/candles`, `/snapshots`, `/smart-wallets`,
-`/api/tokens/:mint/stream`, and the `token`, `screening`, `momentum` and `smart-wallet` events on
+`/api/tokens/:mint/stream`, and the `token`, `screening`, `momentum`, `smart-wallet` and `cycle` events on
 `/api/stream`. A token that does not qualify answers `404 TOKEN_NOT_FOUND` exactly as if it did not
 exist, and is never included in lists or events. A token becomes visible as soon as it qualifies
 (e.g. its 3rd conviction wallet buys it in minute 3); its per-token stream sends nothing until then.

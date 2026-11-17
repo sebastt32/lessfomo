@@ -122,6 +122,34 @@ import {
   userByUsernameStatement,
 } from "../auth-sql.js";
 import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
+import type { CycleSample } from "../../../token-cycle/domain/cycle-analysis.js";
+import type { CycleState, SnapshotPoint, TradeCursor, TradePoint } from "../../../token-cycle/domain/token-cycle.js";
+import type {
+  CycleBacklogCursor,
+  CycleToken,
+  FollowedCycle,
+  StoredCycle,
+  TokenCycleStore,
+} from "../../../token-cycle/domain/token-cycle-store.js";
+import { toStoredCycle } from "../token-cycle-rows.js";
+import {
+  appearanceAtStatement,
+  createCycleStatement,
+  cycleSamplesStatement,
+  cycleSnapshotsStatement,
+  cycleTokenSql,
+  cycleTradesStatement,
+  recentCyclesStatement,
+  saveCycleStatement,
+  toCycleSample,
+  toCycleToken,
+  toFollowedCycle,
+  tokenCycleSql,
+  tokenCyclesDdl,
+  tokensMissingCycleStatement,
+  toSnapshotPoints,
+  toTradePoints,
+} from "../token-cycle-sql.js";
 import {
   candlesSql,
   devTradesSql,
@@ -137,6 +165,7 @@ import {
   toToken,
   tokenValues,
   toCandle,
+  toDateOrNull,
   toDevTrade,
   tradeValues,
   type ChartDialect,
@@ -209,6 +238,7 @@ ${tokenStateDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
 ${tokenSnapshotsDdl({ id: "BIGSERIAL PRIMARY KEY", real: "DOUBLE PRECISION", time: "BIGINT" })}
 ${walletReputationDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
 ${authDdl({ time: "BIGINT" })}
+${tokenCyclesDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
 `;
 
 /** Serializes concurrent migrations (e.g. two containers starting during a redeploy). */
@@ -262,7 +292,7 @@ export interface PostgresHistoryOptions {
 
 /** Stores and reads history in PostgreSQL. Every query is parameterized. */
 export class PostgresHistory
-  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore
+  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore, TokenCycleStore
 {
   private constructor(private readonly pool: pg.Pool) {}
 
@@ -508,6 +538,51 @@ export class PostgresHistory
 
   async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return (await this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to))).map(toStoredOutcome);
+  }
+
+  async cycleToken(mint: string): Promise<CycleToken | null> {
+    const [row] = await this.query(cycleTokenSql(CHART_DIALECT), mint);
+    return row === undefined ? null : toCycleToken(row);
+  }
+
+  async appearanceAt(mint: string, minConvictionWallets: number): Promise<Date | null> {
+    return toDateOrNull((await this.rows(appearanceAtStatement(CATALOG_DIALECT, mint, minConvictionWallets)))[0]?.["first_buy_at"]);
+  }
+
+  async createCycle(mint: string, appearedAt: Date, now: Date): Promise<{ cycle: StoredCycle; created: boolean }> {
+    const created = (await this.rows(createCycleStatement(CATALOG_DIALECT, mint, appearedAt, now))).length > 0;
+    const [row] = await this.query(tokenCycleSql(CHART_DIALECT), mint);
+    if (row === undefined) throw new Error(`token cycle of ${mint} was not stored`);
+    return { cycle: toStoredCycle(row), created };
+  }
+
+  async tokenCycle(mint: string): Promise<StoredCycle | null> {
+    const [row] = await this.query(tokenCycleSql(CHART_DIALECT), mint);
+    return row === undefined ? null : toStoredCycle(row);
+  }
+
+  async saveCycle(mint: string, state: CycleState, caughtUp: boolean, updatedAt: Date): Promise<void> {
+    await this.rows(saveCycleStatement(CATALOG_DIALECT, mint, state, caughtUp, updatedAt));
+  }
+
+  async cycleTrades(mint: string, after: TradeCursor | null, limit: number): Promise<TradePoint[]> {
+    return toTradePoints(await this.rows(cycleTradesStatement(CATALOG_DIALECT, mint, after, limit)), after);
+  }
+
+  async cycleSnapshots(mint: string, after: Date | null, limit: number): Promise<SnapshotPoint[]> {
+    return toSnapshotPoints(await this.rows(cycleSnapshotsStatement(CATALOG_DIALECT, mint, after, limit)));
+  }
+
+  async tokensMissingCycle(minConvictionWallets: number, before: CycleBacklogCursor | null, limit: number): Promise<CycleToken[]> {
+    return (await this.rows(tokensMissingCycleStatement(CATALOG_DIALECT, minConvictionWallets, before, limit))).map(toCycleToken);
+  }
+
+  async recentCycles(detectedAfter: Date, limit: number): Promise<FollowedCycle[]> {
+    return (await this.rows(recentCyclesStatement(CATALOG_DIALECT, detectedAfter, limit))).map(toFollowedCycle);
+  }
+
+  async cycleSamples(from: Date, to: Date): Promise<CycleSample[]> {
+    return (await this.rows(cycleSamplesStatement(CATALOG_DIALECT, from, to))).map(toCycleSample);
   }
 
   async createUser(user: NewUser): Promise<boolean> {

@@ -1,3 +1,4 @@
+import { DEFAULT_CYCLE_RULES, type CycleRules } from "../token-cycle/domain/token-cycle.js";
 import { DEFAULT_REPUTATION_RULES, type ReputationRules } from "../wallet-reputation/domain/reputation-rules.js";
 
 /** Everything the process reads from its environment, read once at startup. */
@@ -54,6 +55,20 @@ export interface AppConfig {
     /** Most tokens closed per tick (backfill included). */
     readonly batchSize: number;
     /** Wait after startup before the first close or backfill tick. */
+    readonly startDelayMs: number;
+  };
+  readonly tokenCycle: {
+    /** Thresholds of the cycle (decision D1): explosion 2× base, run-up start 1.2× base, crash 50% of the peak, late 2× launch. */
+    readonly rules: CycleRules;
+    /** A public token keeps trade-by-trade data this long after its creation (`PUBLIC_TRACKING_HOURS`, decision D2). */
+    readonly publicTrackingMs: number;
+    /** Most public tokens stored trade by trade at once; when full, the most recently appeared are kept. */
+    readonly maxExtendedTokens: number;
+    /** Least time between two new-peak `cycle` events of a token. */
+    readonly eventMinIntervalMs: number;
+    /** Most cycles backfilled per tick. */
+    readonly backfillBatchSize: number;
+    /** Wait after startup before following public tokens again and backfilling cycles. */
     readonly startDelayMs: number;
   };
 }
@@ -119,6 +134,14 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
     rules: DEFAULT_REPUTATION_RULES,
     closeGraceMs: 30_000,
     batchSize: 25,
+    startDelayMs: 5_000,
+  },
+  tokenCycle: {
+    rules: DEFAULT_CYCLE_RULES,
+    publicTrackingMs: readNumber(env, "PUBLIC_TRACKING_HOURS", 24) * 3_600_000,
+    maxExtendedTokens: 2_000,
+    eventMinIntervalMs: 10_000,
+    backfillBatchSize: 20,
     startDelayMs: 5_000,
   },
 });

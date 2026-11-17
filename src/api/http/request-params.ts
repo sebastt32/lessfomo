@@ -4,7 +4,7 @@ import { ApiErrors } from "./api-error.js";
 
 const BASE58_MINT = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 export const MAX_LIMIT = 100;
-const CANDLE_INTERVALS: Readonly<Record<string, number>> = { "1s": 1, "1m": 60, "5m": 300 };
+const CANDLE_INTERVALS: Readonly<Record<string, number>> = { "1s": 1, "1m": 60, "5m": 300, "15m": 900, "1h": 3600 };
 const DEFAULT_CANDLE_INTERVAL = "1m";
 
 /** The first value of a query parameter, or null when absent (`URLSearchParams.get`). */
@@ -53,7 +53,7 @@ export interface CandleInterval {
   readonly seconds: number;
 }
 
-/** `1s`, `1m` or `5m` (default `1m`), or 400 INVALID_INTERVAL. */
+/** `1s`, `1m`, `5m`, `15m` or `1h` (default `1m`), or 400 INVALID_INTERVAL. */
 export const parseCandleInterval = (raw: string | null): CandleInterval => {
   const name = raw ?? DEFAULT_CANDLE_INTERVAL;
   const seconds = Object.hasOwn(CANDLE_INTERVALS, name) ? CANDLE_INTERVALS[name] : undefined;

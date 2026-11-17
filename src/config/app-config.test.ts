@@ -41,4 +41,21 @@ describe("loadAppConfig", () => {
       expect(auth({ AUTH_SESSION_DAYS: invalid }).sessionDays).toBe(7);
     }
   });
+
+  it("keeps public tokens trade by trade for PUBLIC_TRACKING_HOURS, 24 by default", () => {
+    const tracking = (value?: string) => loadAppConfig(value === undefined ? {} : { PUBLIC_TRACKING_HOURS: value }, new Date()).tokenCycle.publicTrackingMs;
+
+    expect(tracking()).toBe(24 * 3_600_000);
+    expect(tracking("48")).toBe(48 * 3_600_000);
+    expect(tracking("0.5")).toBe(1_800_000);
+    for (const invalid of ["", "0", "-2", "day"]) expect(tracking(invalid)).toBe(24 * 3_600_000);
+  });
+
+  it("uses the D1 cycle thresholds by default and leaves the momentum window alone", () => {
+    const config = loadAppConfig({ PUBLIC_TRACKING_HOURS: "48" }, new Date());
+
+    expect(config.tokenCycle.rules).toEqual({ explosionMultiple: 2, runStartMultiple: 1.2, crashFraction: 0.5, lateMultiple: 2, snapshotQuietMs: 120_000 });
+    expect(config.tokenCycle.eventMinIntervalMs).toBe(10_000);
+    expect(config.momentum.trackingWindowMs).toBe(3_600_000);
+  });
 });

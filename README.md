@@ -49,6 +49,7 @@ All variables are optional.
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
+| `PUBLIC_TRACKING_HOURS` | `24` | Hours after its creation that a public token keeps trade-by-trade data (see [Token cycle](#token-cycle)); any positive number, invalid values use `24` |
 | `PUBLIC_MIN_CONVICTION_WALLETS` | `3` | Conviction wallets (at entry) a token needs to be shown by the public API (positive integer; invalid values use `3`). Replaces `PUBLIC_MIN_SMART_WALLETS`, which is no longer read |
 
 ## Safety checks
@@ -217,6 +218,56 @@ within the 10 minutes, `medianPeakX` over the rest of the live window). With `by
 same statistics are grouped by conviction wallets, entered after the k-th conviction wallet's first
 buy.
 
+## Token cycle
+
+For every public token the platform stores its cycle, the pattern "stable, explosion, crash", and
+how long it could be bought before the explosion.
+
+**Appeared.** A token appears at the moment it becomes public: the first buy of the conviction
+wallet that made its count reach `PUBLIC_MIN_CONVICTION_WALLETS` (the time of that buy, not of its
+rating a few seconds later). That moment is stored once and never changes, even if the token's
+stored conviction wallets change later.
+
+| Field | Rule |
+| --- | --- |
+| Launch price | Price of the first trade seen |
+| Base price | Price of the last trade at or before the appearance |
+| Appeared late | Before appearing, the price had already reached 2× the launch price. The invest window is then negative: minus the seconds between that first 2× and the appearance |
+| Explosion | First trade after appearing priced at least 2× the base |
+| Run-up start | Last trade before the explosion priced at most 1.2× the base (the appearance if there is none) |
+| Invest window | Run-up start minus appearance, once exploded |
+| Peak | Highest price from the explosion until the crash |
+| Crash | First trade after the peak priced at most 50% of it. The cycle is then complete: peak and crash stay; the last price and the deepest fall from the peak keep updating |
+| Phase | `stable` until the explosion, `exploding` until the crash, then `crashed` |
+
+The thresholds (2×, 1.2×, 50%, 2× for late) live in `tokenCycle.rules` of `src/config/app-config.ts`.
+
+**No look-ahead.** The cycle is a state machine folded over the token's prices in time order: each
+field comes only from the prices up to that moment, a recorded explosion, run-up start or crash
+never moves, and each stored trade is folded exactly once (a cursor is stored with the cycle), so a
+restart continues where it stopped.
+
+**Trade-by-trade data for 24 hours.** From the moment it appears, a public token keeps storing its
+trades (and publishing them on its stream) until `PUBLIC_TRACKING_HOURS` after its creation, from
+the same Solana log subscription. Only public tokens are extended, at most 2,000 at once (when
+full, the most recently appeared are kept). Nothing else changes: momentum still follows a token
+for `TRACKING_WINDOW_MS`, wallet results still close at that window using only the trades before it,
+and snapshots keep their schedule. After a restart the public tokens still inside their 24 hours are
+followed again. Once trades stop, the cycle continues from the prices of the token's
+[snapshots](#snapshots), so late peaks and crashes are still recorded; a snapshot price only counts
+when the token had no stored trade in the 2 minutes before it.
+
+**Backfill.** On startup (and every 30 seconds afterwards, for tokens that became public through
+the reputation backfill) stored public tokens without a cycle get theirs from their stored trades
+and snapshot prices, newest first, 20 tokens per tick, logging its progress as `[cycles] ...`. It
+resumes after a restart, never recomputes a finished cycle and only writes `token_cycles`.
+
+**API.** `cycle` on movers, token lists, screenings and the token detail; `phase` and `appearedLate`
+filters and `appearedAt` / `investWindow` sorts on `GET /api/tokens`; a `cycle` event on both streams
+(the token appears, changes phase, or sets a new peak, at most one every 10 seconds per token);
+and `GET /api/analysis/cycles` with the share that appeared in time, exploded and crashed, and how
+much window they gave. All of it behind the sign-in and the public visibility rule.
+
 ## History
 
 Everything is stored in PostgreSQL when `DATABASE_URL` is set, otherwise in a local
@@ -229,7 +280,7 @@ live streams.
 | --- | --- |
 | `tokens` | Every detected token |
 | `screenings` | Each safety check result, failure codes and holder metrics |
-| `trades` | Every trade of a tracked token |
+| `trades` | Every trade of a tracked token; for public tokens, until `PUBLIC_TRACKING_HOURS` after their creation |
 | `momentum_snapshots` | Score, components and metrics per token per minute (active tokens only) |
 | `token_state` | Latest state of each token (status, liquidity, prices, max score, holders, last trade) and its snapshot schedule |
 | `token_snapshots` | Every snapshot of [Snapshots](#snapshots) |
@@ -239,6 +290,7 @@ live streams.
 | `token_smart_wallets`, `smart_wallet_tokens` | Smart wallets of each token (tier and style at entry) and their counts (`conviction` included) |
 | `smart_wallet_outcomes` | Outcome of each closed token for the smart-wallet analysis |
 | `conviction_outcomes` | The same outcome counting conviction wallets only (`by=conviction`) |
+| `token_cycles` | Cycle of each public token: when it appeared, base price, explosion, peak, crash, and the cursor it continues from |
 | `users` | Who may sign in: username (unique ignoring case), password hash and role |
 | `sessions` | Open sessions by the SHA-256 of their token, with their expiry |
 
@@ -247,6 +299,7 @@ Columns added later (`token_closures.version`, `wallet_token_results.first_sell_
 `token_smart_wallets.style_at_entry`, `smart_wallet_tokens.conviction`, `wallet_reputation.style`,
 `flip_rate`, `median_hold_seconds`) are added on startup to these derived tables only; raw tables
 are never altered.
+`token_cycles` is created on startup in older databases too and filled by its backfill; no existing table changes.
 `users` and `sessions` are created on startup in older databases too, and both get a
 `credential_version` column added on startup (existing sessions stay valid); no other table changes.
 `token_state` and `token_snapshots` are created on startup in older databases too; the state
@@ -274,16 +327,17 @@ While running, the screener exposes a read-only JSON + Server-Sent Events API on
 | `GET /api/health` | Status and data source health |
 | `GET /api/movers` | Latest momentum ranking (`minConvictionWallets`, `minSmartWallets` filters) |
 | `GET /api/screenings` | Recent safety check results (`minConvictionWallets`, `minSmartWallets` filters) |
-| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score, text, `minConvictionWallets` and `minSmartWallets` filters, `sort=convictionWallets:desc` or `sort=smartWallets:desc` |
+| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score, text, `minConvictionWallets`, `minSmartWallets`, `phase` and `appearedLate` filters, `sort=convictionWallets:desc`, `smartWallets:desc`, `appearedAt` or `investWindow` |
 | `GET /api/tokens/:mint/smart-wallets` | Smart wallets of a token, with the record that makes each one good |
 | `GET /api/wallets/:address` | A wallet's current record and its results of the last 7 days |
 | `GET /api/analysis/smart-wallets` | Success of tokens by number of smart wallets (`from`, `to`, `by=conviction`) |
+| `GET /api/analysis/cycles` | Share of public tokens that appeared in time, exploded and crashed, and their invest windows (`from`, `to`) |
 | `GET /api/tokens/:mint` | Full history of one token (public tokens only, like every token endpoint) |
 | `GET /api/tokens/:mint/snapshots` | Snapshots of one token, oldest first |
-| `GET /api/tokens/:mint/candles` | OHLCV candles (`interval=1s\|1m\|5m`, `limit`), dev trades and SOL/USD price |
-| `GET /api/tokens/:mint/stream` | Live `trade` and `sol-price` events of one token |
+| `GET /api/tokens/:mint/candles` | OHLCV candles (`interval=1s\|1m\|5m\|15m\|1h`, `limit` up to 2000), dev trades and SOL/USD price |
+| `GET /api/tokens/:mint/stream` | Live `trade`, `cycle` and `sol-price` events of one token |
 | `GET /api/stats` | Totals: tokens (active, dead, migrated), statuses, trades, snapshots |
-| `GET /api/stream` | Live `token`, `screening`, `momentum`, `status` and `smart-wallet` events |
+| `GET /api/stream` | Live `token`, `screening`, `momentum`, `status`, `smart-wallet` and `cycle` events |
 | `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/password` | Sign in, current user, sign out, change password |
 
 Candles are built on request from the stored `trades` table, so they cover every trade of a
@@ -352,6 +406,7 @@ code 1 and changes nothing unless `--reset` is given. No credentials live in the
 PumpPortal (new tokens) ──┬─→ safety checks (Solana RPC + RugCheck) ─┐
                           │                                         ├─→ console + history (PostgreSQL or SQLite)
 Solana RPC logs (trades) ─┼─→ momentum tracker (every minute) ──────┤
+                          ├─→ token cycles (public tokens, 24 h) ───┤
                           └─→ snapshots (+ DexScreener, RugCheck) ──┤
                                                                     └─→ live feed → HTTP + SSE API
 ```
@@ -368,8 +423,9 @@ because `tsx` and Vitest do not emit decorator metadata):
 | `TokenDiscoveryModule` | `NEW_TOKEN_SOURCE` (PumpPortal) |
 | `SafetyChecksModule` | `MINT_AUTHORITY_READER`, `HOLDER_DISTRIBUTION_READER`, `SAFETY_THRESHOLDS` |
 | `MomentumModule` | `MOMENTUM_TRACKER`, `TRADE_SOURCE` (Solana logs) |
-| `HistoryModule` | `HISTORY_STORE`, `HISTORY_READER`, `HISTORY_RECORDER`, `TOKEN_CATALOG_READER`, `SNAPSHOT_STORE`, `WALLET_REPUTATION_STORE` (PostgreSQL or SQLite) |
+| `HistoryModule` | `HISTORY_STORE`, `HISTORY_READER`, `HISTORY_RECORDER`, `TOKEN_CATALOG_READER`, `SNAPSHOT_STORE`, `WALLET_REPUTATION_STORE`, `TOKEN_CYCLE_STORE` (PostgreSQL or SQLite) |
 | `WalletReputationModule` | `SMART_WALLET_TRACKER`, `REPUTATION_CLOSER`, `WALLET_REPUTATION_QUERIES` |
+| `TokenCycleModule` | `TOKEN_CYCLE_TRACKER` (cycles of public tokens, live and backfill), `EXTENDED_TRADE_STORAGE`, `TOKEN_CYCLE_QUERIES` |
 | `SnapshotsModule` | `SNAPSHOT_SCHEDULER`, `MARKET_DATA_SOURCE` (DexScreener) |
 | `LiveFeedModule` | `LIVE_FEED` |
 | `MarketPriceModule` | `SOL_PRICE_FEED`, `SOL_USD_PRICE` |

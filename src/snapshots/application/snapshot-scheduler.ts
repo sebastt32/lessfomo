@@ -16,7 +16,7 @@ import {
   resolveDueMilestone,
   type DueMilestone,
 } from "../domain/milestone-schedule.js";
-import type { DueToken, SnapshotStore } from "../domain/snapshot-store.js";
+import type { DueToken, SnapshotStateChange, SnapshotStore } from "../domain/snapshot-store.js";
 import { MarketWatch } from "./market-watch.js";
 
 const MINUTE_MS = 60_000;
@@ -106,9 +106,15 @@ export class SnapshotScheduler {
   private ticking: Promise<void> | null = null;
   /** Price of the scheduled snapshots taken in the current tick, so their peaks raise no duplicate event. */
   private readonly scheduledPrices = new Map<string, number>();
+  private snapshotListener: ((snapshot: TokenSnapshot) => void) | null = null;
 
   constructor(private readonly options: SnapshotSchedulerOptions) {
     this.clock = options.clock ?? (() => new Date());
+  }
+
+  /** Calls `listener` after every snapshot is stored (scheduled or event). It must not throw. */
+  onSnapshotSaved(listener: (snapshot: TokenSnapshot) => void): void {
+    this.snapshotListener = listener;
   }
 
   /** Watches the tokens still on schedule again, then ticks every interval. */
@@ -267,12 +273,12 @@ export class SnapshotScheduler {
     }
     await this.saveScheduled(due, resolved, snapshot);
     if (quote?.migrated === true && !knownLiquidity.migrated) {
-      await store.saveSnapshot({ ...snapshot, milestone: "event:migrated" }, {});
+      await this.save({ ...snapshot, milestone: "event:migrated" }, {});
     }
   }
 
   private async saveScheduled(due: DueToken, resolved: DueMilestone, snapshot: TokenSnapshot): Promise<void> {
-    await this.options.store.saveSnapshot(snapshot, {
+    await this.save(snapshot, {
       next: { milestone: resolved.following, at: resolved.followingAt },
       lastMilestone: resolved.milestone,
     });
@@ -281,6 +287,11 @@ export class SnapshotScheduler {
     if ((milestoneOffsetMs(resolved.milestone) ?? 0) >= HOLDERS_FROM_MS) {
       this.options.holders.request({ token: holderToken(due), snapshot, holderThreshold: due.market.holderThreshold });
     }
+  }
+
+  private async save(snapshot: TokenSnapshot, change: SnapshotStateChange): Promise<void> {
+    await this.options.store.saveSnapshot(snapshot, change);
+    this.snapshotListener?.(snapshot);
   }
 
   /** Migration and new-peak events seen in the trade stream (at most one new peak per milestone window). */
@@ -309,7 +320,7 @@ export class SnapshotScheduler {
       lastPriceSol: peakWindow === undefined ? (watched.lastPriceSol ?? watched.peakPriceSol) : watched.peakPriceSol,
       liquidity: watched.liquidity,
     });
-    await this.options.store.saveSnapshot(snapshot, peakWindow === undefined ? {} : { peakEventWindow: peakWindow });
+    await this.save(snapshot, peakWindow === undefined ? {} : { peakEventWindow: peakWindow });
     if (peakWindow !== undefined) this.watch.peakEventTaken(mint, peakWindow);
   }
 }

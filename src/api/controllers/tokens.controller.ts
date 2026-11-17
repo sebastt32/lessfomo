@@ -11,6 +11,8 @@ import { LimitPipe, MintPipe, parseCandleInterval, SearchParam, SearchParams } f
 import { parseTokenListQuery } from "../http/token-list-query.js";
 import { LiveStreams } from "../live-streams.js";
 import { TokenVisibility } from "../token-visibility.js";
+import type { TokenCycleQueries } from "../../token-cycle/application/token-cycle-queries.js";
+import { TOKEN_CYCLE_QUERIES } from "../../token-cycle/token-cycle.module.js";
 import type { WalletReputationQueries } from "../../wallet-reputation/application/wallet-reputation-queries.js";
 import { WALLET_REPUTATION_QUERIES } from "../../wallet-reputation/wallet-reputation.module.js";
 import {
@@ -23,7 +25,7 @@ import {
 } from "../views.js";
 
 const DEFAULT_CANDLES_LIMIT = 300;
-const MAX_CANDLES_LIMIT = 1000;
+const MAX_CANDLES_LIMIT = 2000;
 /** pump.fun tokens always have a fixed supply of one billion. */
 const PUMP_TOTAL_SUPPLY = 1_000_000_000;
 
@@ -38,6 +40,7 @@ export class TokensController {
     @Inject(WALLET_REPUTATION_QUERIES) private readonly reputation: WalletReputationQueries,
     @Inject(TokenVisibility) private readonly visibility: TokenVisibility,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    @Inject(TOKEN_CYCLE_QUERIES) private readonly cycles: TokenCycleQueries,
   ) {}
 
   @Get("tokens")
@@ -93,7 +96,7 @@ export class TokensController {
     await this.visibility.assertPublic(mint);
     const tokenHistory = await this.history.tokenHistory(mint);
     if (tokenHistory === null) throw ApiErrors.tokenNotFound();
-    return tokenHistoryView(tokenHistory);
+    return tokenHistoryView(tokenHistory, await this.cycles.tokenCycle(mint));
   }
 
   /** Anything else under a token (`/api/tokens/`, `/api/tokens/<mint>/other`) is not a mint. */

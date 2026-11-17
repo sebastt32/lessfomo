@@ -2,6 +2,7 @@ import type { MomentumSnapshot } from "../../momentum/application/momentum-track
 import { liquidityFromCurve, UNKNOWN_LIQUIDITY, type Liquidity } from "../../momentum/domain/liquidity.js";
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
+import type { TokenCycle } from "../../token-cycle/domain/token-cycle.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
 import type { SmartWalletChange } from "../../wallet-reputation/application/smart-wallet-tracker.js";
 import {
@@ -23,6 +24,8 @@ export interface Mover {
   readonly snapshot: MomentumSnapshot;
   /** Good-or-elite wallets that bought the token so far, and how many had the conviction style. */
   readonly smartWallets: SmartWalletsSummary;
+  /** The token's cycle once it appeared; absent before. */
+  readonly cycle?: TokenCycle;
 }
 
 export type LiveEvent =
@@ -32,6 +35,7 @@ export type LiveEvent =
       readonly result: ScreeningResult;
       readonly evaluatedAt: Date;
       readonly smartWallets: SmartWalletsSummary;
+      readonly cycle?: TokenCycle;
     }
   | { readonly type: "momentum"; readonly at: Date; readonly movers: readonly Mover[] }
   | { readonly type: "status"; readonly sources: SourceStatuses }
@@ -40,7 +44,8 @@ export type LiveEvent =
       readonly mint: string;
       readonly smartWallets: SmartWalletsSummary;
       readonly wallet: SmartWalletInToken;
-    };
+    }
+  | { readonly type: "cycle"; readonly mint: string; readonly cycle: TokenCycle };
 
 export type LiveListener = (event: LiveEvent) => void;
 
@@ -69,7 +74,11 @@ interface TokenState {
   liquidity: Liquidity;
   smartWallets: SmartWalletsSummary;
   lastScreening: { readonly result: ScreeningResult; readonly evaluatedAt: Date } | null;
+  cycle: TokenCycle | null;
 }
+
+/** `{ cycle }` when there is one, so events and movers of tokens without a cycle stay as they were. */
+const withCycle = (cycle: TokenCycle | null | undefined): { readonly cycle?: TokenCycle } => (cycle == null ? {} : { cycle });
 
 /** Use case: in-memory view of what is happening right now, plus an event bus for live clients. */
 export class LiveFeed {
@@ -96,6 +105,7 @@ export class LiveFeed {
         liquidity: UNKNOWN_LIQUIDITY,
         smartWallets: NO_SMART_WALLETS,
         lastScreening: null,
+        cycle: null,
       });
     }
     const event: LiveEvent = { type: "token", token };
@@ -109,7 +119,13 @@ export class LiveFeed {
       state.status = result.status;
       state.lastScreening = { result, evaluatedAt };
     }
-    const event: LiveEvent = { type: "screening", result, evaluatedAt, smartWallets: state?.smartWallets ?? NO_SMART_WALLETS };
+    const event: LiveEvent = {
+      type: "screening",
+      result,
+      evaluatedAt,
+      smartWallets: state?.smartWallets ?? NO_SMART_WALLETS,
+      ...withCycle(state?.cycle),
+    };
     this.emit(event);
     if (this.isPublic(result.token.mint)) this.emitPublic(event);
   }
@@ -120,7 +136,16 @@ export class LiveFeed {
         const state = this.tokens.get(snapshot.mint);
         return state === undefined
           ? []
-          : [{ token: state.token, status: state.status, liquidity: state.liquidity, snapshot, smartWallets: state.smartWallets }];
+          : [
+              {
+                token: state.token,
+                status: state.status,
+                liquidity: state.liquidity,
+                snapshot,
+                smartWallets: state.smartWallets,
+                ...withCycle(state.cycle),
+              },
+            ];
       })
       .sort((a, b) => b.snapshot.momentum.score - a.snapshot.momentum.score);
     this.moversAt = at;
@@ -141,7 +166,7 @@ export class LiveFeed {
       // Public clients learn about the token the moment it qualifies, then about its safety check.
       this.emitPublic({ type: "token", token: state.token });
       if (state.lastScreening !== null) {
-        this.emitPublic({ type: "screening", ...state.lastScreening, smartWallets: change.smartWallets });
+        this.emitPublic({ type: "screening", ...state.lastScreening, smartWallets: change.smartWallets, ...withCycle(state.cycle) });
       }
     }
     if (this.isPublicSummary(change.smartWallets)) this.emitPublic(event);
@@ -160,8 +185,28 @@ export class LiveFeed {
     else if (message.startsWith("disconnected")) this.sourceStatusChanged(source, "disconnected");
   }
 
-  /** Keeps the token's latest liquidity and publishes a stored trade to the subscribers of its token. */
-  tradeRecorded(trade: Trade): void {
+  /** Keeps a token's latest cycle, shown with its movers and screenings, without publishing it. */
+  cycleUpdated(mint: string, cycle: TokenCycle): void {
+    const state = this.tokens.get(mint);
+    if (state !== undefined) state.cycle = cycle;
+  }
+
+  /**
+   * Publishes the cycle of a public token (it appeared, changed phase or set a new peak). The
+   * caller applies the visibility rule: the feed may have forgotten the token long ago.
+   */
+  cycleChanged(mint: string, cycle: TokenCycle): void {
+    this.cycleUpdated(mint, cycle);
+    const event: LiveEvent = { type: "cycle", mint, cycle };
+    this.emit(event);
+    this.emitPublic(event);
+  }
+
+  /**
+   * Keeps the token's latest liquidity and publishes a stored trade to the subscribers of its
+   * token. `creator` is given for trades stored after the feed forgot the token (decision D2).
+   */
+  tradeRecorded(trade: Trade, creator?: string): void {
     const state = this.tokens.get(trade.mint);
     if (state !== undefined && trade.curve !== undefined) {
       const liquidity = liquidityFromCurve(trade.curve);
@@ -169,8 +214,8 @@ export class LiveFeed {
     }
     const listeners = this.tradeListeners.get(trade.mint);
     if (listeners === undefined) return;
-    const creator = this.tokens.get(trade.mint)?.token.creator;
-    notifyAll([...listeners], { trade, isDev: creator !== undefined && trade.trader === creator });
+    const knownCreator = state?.token.creator ?? creator;
+    notifyAll([...listeners], { trade, isDev: knownCreator !== undefined && trade.trader === knownCreator });
   }
 
   subscribeTrades(mint: string, listener: TradeListener): () => void {
@@ -201,8 +246,9 @@ export class LiveFeed {
   getMovers(limit: number, minSmartWallets = 0, minConvictionWallets = 0): { at: Date | null; movers: readonly Mover[] } {
     const movers = this.movers
       .map((mover) => {
-        const current = this.tokens.get(mover.token.mint)?.smartWallets;
-        return current === undefined || current === mover.smartWallets ? mover : { ...mover, smartWallets: current };
+        const state = this.tokens.get(mover.token.mint);
+        if (state === undefined || (state.smartWallets === mover.smartWallets && (state.cycle ?? undefined) === mover.cycle)) return mover;
+        return { ...mover, smartWallets: state.smartWallets, ...withCycle(state.cycle) };
       })
       .filter((mover) => mover.smartWallets.count >= minSmartWallets && mover.smartWallets.conviction >= minConvictionWallets);
     return { at: this.moversAt, movers: movers.slice(0, limit) };

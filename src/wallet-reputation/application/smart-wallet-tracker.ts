@@ -173,6 +173,16 @@ export class SmartWalletTracker {
     return { count: state.smart.size, elite, holding, conviction };
   }
 
+  /** First buys of the token's conviction wallets (style at entry) rated so far, earliest first. */
+  convictionFirstBuys(mint: string): Date[] {
+    const state = this.tokens.get(mint);
+    if (state === undefined) return [];
+    return [...state.smart.values()]
+      .filter(({ style }) => style === "conviction")
+      .map(({ position }) => position.firstBuyAt)
+      .sort((a, b) => a.getTime() - b.getTime());
+  }
+
   /** Forgets tokens whose window ended and whose first buys are all rated (or one more window later). */
   prune(now: Date): void {
     const nowMs = now.getTime();

@@ -135,4 +135,33 @@ describe("parseTokenListQuery", () => {
       'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
     );
   });
+
+  it("filters by cycle phase and late appearance, leaving the query untouched when they are absent", () => {
+    expect(parse("phase=stable").phases).toEqual(["stable"]);
+    expect(parse("phase=crashed,exploding,crashed").phases).toEqual(["crashed", "exploding"]);
+    expect(parse("appearedLate=true").appearedLate).toBe(true);
+    expect(parse("appearedLate=false").appearedLate).toBe(false);
+    expect("phases" in parse("")).toBe(false);
+    expect("appearedLate" in parse("")).toBe(false);
+    for (const invalid of ["phase=", "phase=mooning", "phase=stable,,crashed", "phase=Stable"]) {
+      expect(rejection(invalid)).toEqual({
+        status: 400,
+        code: "INVALID_QUERY",
+        message: 'Invalid query parameter "phase": expected a comma-separated list of stable, exploding, crashed',
+      });
+    }
+    for (const invalid of ["appearedLate=", "appearedLate=yes", "appearedLate=1", "appearedLate=TRUE"]) {
+      expect(rejection(invalid).message).toBe('Invalid query parameter "appearedLate": expected true or false');
+    }
+  });
+
+  it("sorts by appearance and by invest window in both directions, without changing the sort error message", () => {
+    expect(parse("sort=appearedAt:asc").sort).toEqual({ field: "appearedAt", direction: "asc" });
+    expect(parse("sort=appearedAt").sort).toEqual({ field: "appearedAt", direction: "desc" });
+    expect(parse("sort=investWindow:desc").sort).toEqual({ field: "investWindow", direction: "desc" });
+    expect(parse("sort=investWindow:asc").sort).toEqual({ field: "investWindow", direction: "asc" });
+    expect(rejection("sort=investWindow:up").message).toBe(
+      'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
+    );
+  });
 });

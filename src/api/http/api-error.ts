@@ -15,7 +15,7 @@ export class ApiError extends Error {
 export const ApiErrors = {
   badRequestTarget: () => new ApiError(400, "BAD_REQUEST", "Request target is not a valid URL"),
   invalidMint: () => new ApiError(400, "INVALID_MINT", "Mint is not a base58 address"),
-  invalidInterval: () => new ApiError(400, "INVALID_INTERVAL", "Interval must be one of 1s, 1m, 5m"),
+  invalidInterval: () => new ApiError(400, "INVALID_INTERVAL", "Interval must be one of 1s, 1m, 5m, 15m, 1h"),
   invalidQuery: (parameter: string, expected: string) =>
     new ApiError(400, "INVALID_QUERY", `Invalid query parameter "${parameter}": expected ${expected}`),
   tokenNotFound: () => new ApiError(404, "TOKEN_NOT_FOUND", "Token was never seen"),

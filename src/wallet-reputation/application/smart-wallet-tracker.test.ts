@@ -245,4 +245,20 @@ describe("SmartWalletTracker", () => {
       ["steady", "conviction"],
     ]);
   });
+
+  it("lists the first buys of a token's conviction wallets, earliest first", async () => {
+    const { tracker, stats } = setup();
+    stats.set("flipper", { tokens: 5, wins: 4, netPnlSol: 2, flips: 4 });
+
+    tracker.tradeRecorded(trade("elite", "buy", 9));
+    tracker.tradeRecorded(trade("flipper", "buy", 6));
+    tracker.tradeRecorded(trade("good", "buy", 5));
+    tracker.tradeRecorded(trade("nobody", "buy", 4));
+    expect(tracker.convictionFirstBuys("m")).toEqual([]);
+    await tracker.rateThrough(at(9));
+
+    expect(tracker.summary("m")).toMatchObject({ count: 3, conviction: 2 });
+    expect(tracker.convictionFirstBuys("m")).toEqual([at(5), at(9)]);
+    expect(tracker.convictionFirstBuys("unknown")).toEqual([]);
+  });
 });

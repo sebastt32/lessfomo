@@ -16,6 +16,8 @@ import type { Liquidity } from "../momentum/domain/liquidity.js";
 import { PUMP_TOTAL_SUPPLY, type TokenSnapshot } from "../snapshots/domain/assemble-snapshot.js";
 import type { ScreeningResult } from "../screening/token-screener.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
+import type { CycleAnalysisRange } from "../token-cycle/application/token-cycle-queries.js";
+import type { TokenCycle } from "../token-cycle/domain/token-cycle.js";
 import type { WalletDetail, SmartWalletAnalysis } from "../wallet-reputation/application/wallet-reputation-queries.js";
 import type { WalletRecord } from "../wallet-reputation/domain/reputation-rules.js";
 import type {
@@ -44,15 +46,45 @@ export const smartWalletsView = (summary: SmartWalletsSummary) => ({
   conviction: summary.conviction,
 });
 
+const isoOrNull = (date: Date | null): string | null => date?.toISOString() ?? null;
+
+/** `TokenCycle` of docs/API.md "Token cycle". */
+export const tokenCycleView = (cycle: TokenCycle) => ({
+  appearedAt: cycle.appearedAt.toISOString(),
+  launchPriceSol: cycle.launchPriceSol,
+  appearedPriceSol: cycle.appearedPriceSol,
+  riseBeforeAppearanceX: cycle.riseBeforeAppearanceX,
+  appearedLate: cycle.appearedLate,
+  phase: cycle.phase,
+  runStartAt: isoOrNull(cycle.runStartAt),
+  explosionAt: isoOrNull(cycle.explosionAt),
+  investWindowSeconds: cycle.investWindowSeconds,
+  peakAt: isoOrNull(cycle.peakAt),
+  peakX: cycle.peakX,
+  crashAt: isoOrNull(cycle.crashAt),
+  maxDrawdownPct: cycle.maxDrawdownPct,
+  lastPriceX: cycle.lastPriceX,
+  updatedAt: cycle.updatedAt.toISOString(),
+});
+
+/** The cycle, or null for a token without one. */
+export const cycleOrNullView = (cycle: TokenCycle | null | undefined) => (cycle == null ? null : tokenCycleView(cycle));
+
 export const storedScreeningView = (screening: StoredScreening) => ({
   ...screening,
   failureCodes: [...screening.failureCodes],
   evaluatedAt: screening.evaluatedAt.toISOString(),
   detectedAt: screening.detectedAt?.toISOString() ?? null,
   smartWallets: smartWalletsView(screening.smartWallets),
+  cycle: cycleOrNullView(screening.cycle),
 });
 
-export const screeningResultView = (result: ScreeningResult, evaluatedAt: Date, smartWallets: SmartWalletsSummary) => ({
+export const screeningResultView = (
+  result: ScreeningResult,
+  evaluatedAt: Date,
+  smartWallets: SmartWalletsSummary,
+  cycle?: TokenCycle | null,
+) => ({
   mint: result.token.mint,
   symbol: result.token.symbol,
   name: result.token.name,
@@ -65,6 +97,7 @@ export const screeningResultView = (result: ScreeningResult, evaluatedAt: Date, 
   evaluatedAt: evaluatedAt.toISOString(),
   detectedAt: result.token.detectedAt.toISOString(),
   smartWallets: smartWalletsView(smartWallets),
+  cycle: cycleOrNullView(cycle),
 });
 
 export const liquidityView = (liquidity: Liquidity) => ({
@@ -84,6 +117,7 @@ export const moverView = (mover: Mover) => ({
   metrics: mover.snapshot.momentum.metrics,
   liquidity: liquidityView(mover.liquidity),
   smartWallets: smartWalletsView(mover.smartWallets),
+  cycle: cycleOrNullView(mover.cycle),
 });
 
 export const momentumPointView = (point: StoredMomentumPoint) => ({
@@ -93,11 +127,12 @@ export const momentumPointView = (point: StoredMomentumPoint) => ({
   metrics: point.metrics,
 });
 
-export const tokenHistoryView = (history: TokenHistory) => ({
+export const tokenHistoryView = (history: TokenHistory, cycle: TokenCycle | null) => ({
   token: tokenView(history.token),
   status: history.status,
   screenings: history.screenings.map(storedScreeningView),
   momentum: history.momentum.map(momentumPointView),
+  cycle: cycleOrNullView(cycle),
 });
 
 /** Movers pushed on each `momentum` event. */
@@ -108,7 +143,7 @@ export const liveEventView = (event: LiveEvent): { name: string; data: unknown }
     case "token":
       return { name: "token", data: tokenView(event.token) };
     case "screening":
-      return { name: "screening", data: screeningResultView(event.result, event.evaluatedAt, event.smartWallets) };
+      return { name: "screening", data: screeningResultView(event.result, event.evaluatedAt, event.smartWallets, event.cycle) };
     case "momentum":
       return {
         name: "momentum",
@@ -121,6 +156,8 @@ export const liveEventView = (event: LiveEvent): { name: string; data: unknown }
         name: "smart-wallet",
         data: { mint: event.mint, smartWallets: smartWalletsView(event.smartWallets), wallet: smartWalletInTokenView(event.wallet) },
       };
+    case "cycle":
+      return { name: "cycle", data: { mint: event.mint, cycle: tokenCycleView(event.cycle) } };
   }
 };
 
@@ -172,6 +209,7 @@ export const tokenListItemView = (entry: TokenListEntry) => ({
   lastTradeAt: entry.lastTradeAt?.toISOString() ?? null,
   snapshotCount: entry.snapshotCount,
   smartWallets: smartWalletsView(entry.smartWallets),
+  cycle: cycleOrNullView(entry.cycle),
 });
 
 export const tokenSnapshotView = (snapshot: TokenSnapshot) => ({
@@ -256,3 +294,11 @@ export const smartWalletAnalysisView = (analysis: SmartWalletAnalysis) => {
   if (analysis.by !== "conviction") return { ...base, buckets: analysis.buckets.map((bucket) => ({ ...bucket })) };
   return { ...base, buckets: analysis.buckets.map(({ smartWallets, ...rest }) => ({ convictionWallets: smartWallets, ...rest })) };
 };
+
+/** `GET /api/analysis/cycles`: aggregates only. */
+export const cycleAnalysisView = ({ from, to, windowBuckets, ...statistics }: CycleAnalysisRange) => ({
+  from: from.toISOString(),
+  to: to.toISOString(),
+  ...statistics,
+  windowBuckets: windowBuckets.map((bucket) => ({ ...bucket })),
+});

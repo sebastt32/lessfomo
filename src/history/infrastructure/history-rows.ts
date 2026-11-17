@@ -10,6 +10,7 @@ import type {
   StoredScreening,
   StoredToken,
 } from "../domain/history-reader.js";
+import { CYCLE_LIST_COLUMNS, toListCycle } from "./token-cycle-rows.js";
 
 /**
  * Row mapping shared by every SQL adapter, so they all store the same columns in the same
@@ -27,7 +28,12 @@ export const toDate = (value: unknown): Date => new Date(Number(value));
 export const toDateOrNull = (value: unknown): Date | null =>
   value === null || value === undefined ? null : toDate(value);
 
-export const toScreening = (row: Row): StoredScreening => ({
+export const toScreening = (row: Row): StoredScreening => {
+  const cycle = toListCycle(row);
+  return { ...toScreeningWithoutCycle(row), ...(cycle !== null && { cycle }) };
+};
+
+const toScreeningWithoutCycle = (row: Row): StoredScreening => ({
   mint: String(row["mint"]),
   symbol: String(row["symbol"] ?? ""),
   name: String(row["name"] ?? ""),
@@ -151,10 +157,12 @@ export const toSmartWalletsSummary = (row: Row): SmartWalletsSummary => ({
   conviction: Number(row["sw_conviction"] ?? 0),
 });
 
-/** Screenings with their token's name, creation time and smart wallets (aliases `s`, `t`, `w`). */
+/** Screenings with their token's name, creation time, smart wallets and cycle (aliases `s`, `t`, `w`, `c`). */
 export const SCREENINGS_WITH_TOKEN = `
-  SELECT s.*, t.symbol, t.name, t.detected_at AS token_detected_at, ${SMART_SUMMARY_COLUMNS}
-  FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint LEFT JOIN smart_wallet_tokens w ON w.mint = s.mint`;
+  SELECT s.*, t.symbol, t.name, t.detected_at AS token_detected_at, ${SMART_SUMMARY_COLUMNS},
+         ${CYCLE_LIST_COLUMNS}
+  FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint LEFT JOIN smart_wallet_tokens w ON w.mint = s.mint
+       LEFT JOIN token_cycles c ON c.mint = s.mint`;
 
 /**
  * Newest screenings first, insertion order breaking ties; parameter 1 = limit, then the minimum

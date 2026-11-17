@@ -357,6 +357,22 @@ describe("SnapshotScheduler", () => {
       }),
     ]);
   });
+
+  it("tells its listener about every snapshot it stores, after storing it", async () => {
+    const { detect, tradeLive, at, scheduler, store } = setup();
+    const saved: string[] = [];
+    scheduler.onSnapshotSaved((snapshot) => {
+      const stored = store.query("SELECT COUNT(*) AS n FROM token_snapshots WHERE mint = ? AND milestone = ?", snapshot.mint, snapshot.milestone);
+      saved.push(`${snapshot.mint}:${snapshot.milestone}:${String(stored[0]?.["n"])}`);
+    });
+    await detect(token("a"));
+    await tradeLive(trade("a", T0 + 1_000));
+
+    await at(5_000);
+    await at(MINUTE);
+
+    expect(saved).toEqual(["a:0m:1", "a:1m:1"]);
+  });
 });
 
 const listQuery = (nowMs: number) => ({

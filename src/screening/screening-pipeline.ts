@@ -19,6 +19,9 @@ import {
 import { errorMessage } from "../shared/error-message.js";
 import type { SnapshotScheduler } from "../snapshots/application/snapshot-scheduler.js";
 import { SNAPSHOT_SCHEDULER } from "../snapshots/snapshots.module.js";
+import { routeTrade, type ExtendedTradeStorage } from "../token-cycle/application/extended-trade-storage.js";
+import type { TokenCycleTracker } from "../token-cycle/application/token-cycle-tracker.js";
+import { EXTENDED_TRADE_STORAGE, TOKEN_CYCLE_TRACKER } from "../token-cycle/token-cycle.module.js";
 import type { NewTokenSource } from "../token-discovery/domain/new-token-source.js";
 import { NEW_TOKEN_SOURCE } from "../token-discovery/token-discovery.module.js";
 import type { ReputationCloser } from "../wallet-reputation/application/reputation-closer.js";
@@ -47,6 +50,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
   private readonly screener: TokenScreener;
   private momentumTimer: ReturnType<typeof setInterval> | null = null;
   private skipped = 0;
+  private stopWatchingSmartWallets: (() => void) | null = null;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -62,7 +66,11 @@ export class ScreeningPipeline implements OnModuleDestroy {
     @Inject(SNAPSHOT_SCHEDULER) private readonly snapshots: SnapshotScheduler,
     @Inject(SMART_WALLET_TRACKER) private readonly smartWallets: SmartWalletTracker,
     @Inject(REPUTATION_CLOSER) private readonly reputation: ReputationCloser,
+    @Inject(TOKEN_CYCLE_TRACKER) private readonly cycles: TokenCycleTracker,
+    @Inject(EXTENDED_TRADE_STORAGE) private readonly extended: ExtendedTradeStorage,
   ) {
+    // Once trades stop being stored, a public token's cycle continues from its snapshot prices.
+    snapshots.onSnapshotSaved((snapshot) => cycles.snapshotSaved(snapshot.mint));
     /** Feeds every new token to the live feed, the history and the momentum tracker before screening it. */
     const observedTokens: NewTokenSource = {
       start: (onToken) =>
@@ -101,19 +109,29 @@ export class ScreeningPipeline implements OnModuleDestroy {
     this.screener.start();
     this.solPrice.start();
     this.snapshots.start();
+    // A token appears when its live conviction wallets reach the public minimum.
+    this.stopWatchingSmartWallets = this.feed.subscribe((event) => {
+      if (event.type === "smart-wallet") this.cycles.smartWalletChanged(event.mint, event.smartWallets.conviction);
+    });
     this.tradeSource.start((trade) => {
       this.snapshots.tradeObserved(trade);
-      if (!this.tracker.record(trade)) return;
-      safely("history", () => this.recorder.recordTrade(trade));
+      // Stored while the momentum tracker follows the token; afterwards only for public tokens (decision D2).
+      const route = routeTrade(trade, this.tracker, this.extended);
+      if (route === "ignored") return;
+      safely("history", async () => {
+        await this.recorder.recordTrade(trade);
+        this.cycles.tradeStored(trade.mint);
+      });
       // Smart wallets first, so a token's public trade stream includes the buy that makes it public.
-      this.smartWallets.tradeRecorded(trade);
-      this.feed.tradeRecorded(trade);
+      if (route === "live") this.smartWallets.tradeRecorded(trade);
+      this.feed.tradeRecorded(trade, this.extended.creatorOf(trade.mint));
     });
     this.reputation.start();
+    this.cycles.start();
     this.momentumTimer = setInterval(() => this.reportMomentum(), this.config.momentum.reportIntervalMs);
   }
 
-  /** Stops the timer, then the SOL price, trade and token sources, in that order, then the snapshots and the reputation job. */
+  /** Stops the timer, then the SOL price, trade and token sources, in that order, then the snapshots, the reputation job and the cycles. */
   async onModuleDestroy(): Promise<void> {
     if (this.momentumTimer === null) return;
     clearInterval(this.momentumTimer);
@@ -123,6 +141,8 @@ export class ScreeningPipeline implements OnModuleDestroy {
     this.screener.stop();
     await this.snapshots.stop();
     await this.reputation.stop();
+    this.stopWatchingSmartWallets?.();
+    await this.cycles.stop();
   }
 
   /** Records and publishes momentum of active tokens, then prints the top movers. */
@@ -135,6 +155,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
     for (const snapshot of snapshots) safely("history", () => recorder.recordMomentum(snapshot));
     feed.prune(now, trackingWindowMs + evaluationDelayMs);
     this.smartWallets.prune(now);
+    this.cycles.prune(now);
     feed.momentumUpdated(snapshots, now);
 
     console.log(

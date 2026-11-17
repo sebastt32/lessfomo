@@ -1,4 +1,5 @@
 import type { MomentumComponents, MomentumMetrics } from "../../momentum/domain/compute-momentum.js";
+import type { TokenCycle } from "../../token-cycle/domain/token-cycle.js";
 import type { SmartWalletsSummary } from "../../wallet-reputation/domain/wallet-reputation-store.js";
 
 export interface StoredToken {
@@ -27,6 +28,8 @@ export interface StoredScreening {
   readonly detectedAt: Date | null;
   /** Smart wallets (point-in-time tier at entry) that bought the token so far. */
   readonly smartWallets: SmartWalletsSummary;
+  /** The token's cycle; absent when it has none (it never became public). */
+  readonly cycle?: TokenCycle;
 }
 
 export interface StoredMomentumPoint {

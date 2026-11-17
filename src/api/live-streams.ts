@@ -55,7 +55,7 @@ export class LiveStreams implements BeforeApplicationShutdown {
 
   /**
    * `GET /api/tokens/:mint/stream`: nothing until the token is public; then the known SOL/USD price,
-   * then this token's trades and price changes.
+   * then this token's trades, cycle events and price changes.
    */
   openToken(request: IncomingMessage, response: ServerResponse, mint: string): void {
     const { feed, solPrice, visibility } = this;
@@ -82,6 +82,9 @@ export class LiveStreams implements BeforeApplicationShutdown {
       return [
         feed.subscribeTrades(mint, (live) => {
           if (becomeVisible()) send({ name: "trade", data: tradeView(live) });
+        }),
+        feed.subscribePublic((event) => {
+          if (event.type === "cycle" && event.mint === mint && becomeVisible()) send(liveEventView(event));
         }),
         solPrice.subscribe((price) => {
           if (becomeVisible()) send({ name: "sol-price", data: { solUsd: price } });

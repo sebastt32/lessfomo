@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { MomentumSnapshot } from "../../momentum/application/momentum-tracker.js";
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
+import type { TokenCycle } from "../../token-cycle/domain/token-cycle.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
 import { LiveFeed, type LiveEvent, type LiveTrade } from "./live-feed.js";
 
@@ -218,6 +219,88 @@ describe("LiveFeed", () => {
       feed.tradeRecorded(trade("a"));
 
       expect(events).toEqual([]);
+    });
+  });
+
+  describe("token cycles", () => {
+    const cycle = (phase: "stable" | "exploding"): TokenCycle => ({
+      appearedAt: AT,
+      launchPriceSol: 1,
+      appearedPriceSol: 1.5,
+      riseBeforeAppearanceX: 1.5,
+      appearedLate: false,
+      phase,
+      runStartAt: null,
+      explosionAt: null,
+      investWindowSeconds: null,
+      peakAt: null,
+      peakX: null,
+      crashAt: null,
+      maxDrawdownPct: null,
+      lastPriceX: 1,
+      updatedAt: AT,
+    });
+    const unverified: ScreeningResult = { token: token("a"), status: "unverified", reason: "test" };
+
+    it("publishes a cycle change to public and internal listeners", () => {
+      const feed = new LiveFeed(1);
+      const publicEvents: LiveEvent[] = [];
+      const events: LiveEvent[] = [];
+      feed.subscribePublic((event) => publicEvents.push(event));
+      feed.subscribe((event) => events.push(event));
+
+      // The feed forgot this token long ago: the caller already applied the visibility rule.
+      feed.cycleChanged("old", cycle("exploding"));
+
+      expect(publicEvents).toEqual([{ type: "cycle", mint: "old", cycle: cycle("exploding") }]);
+      expect(events).toEqual(publicEvents);
+    });
+
+    it("shows the latest cycle with movers and screenings, without an event for a silent update", () => {
+      const feed = new LiveFeed(1);
+      const events: LiveEvent[] = [];
+      feed.tokenDetected(token("a"));
+      feed.momentumUpdated([snapshot("a", 10, AT)], AT);
+      feed.subscribe((event) => events.push(event));
+      expect("cycle" in feed.getMovers(20).movers[0]!).toBe(false);
+
+      feed.cycleUpdated("a", cycle("stable"));
+      expect(events).toEqual([]);
+      expect(feed.getMovers(20).movers[0]?.cycle).toEqual(cycle("stable"));
+
+      feed.cycleChanged("a", cycle("exploding"));
+      feed.screeningFinished(unverified, AT);
+      feed.momentumUpdated([snapshot("a", 10, AT)], AT);
+
+      expect(feed.getMovers(20).movers[0]?.cycle).toEqual(cycle("exploding"));
+      expect(events.map((event) => event.type)).toEqual(["cycle", "screening", "momentum"]);
+      expect(events[1]).toMatchObject({ type: "screening", cycle: cycle("exploding") });
+      expect(events[2]).toMatchObject({ type: "momentum", movers: [{ cycle: cycle("exploding") }] });
+    });
+
+    it("leaves screening events of tokens without a cycle exactly as before", () => {
+      const feed = new LiveFeed(1);
+      const events: LiveEvent[] = [];
+      feed.tokenDetected(token("a"));
+      feed.subscribe((event) => events.push(event));
+
+      feed.screeningFinished(unverified, AT);
+
+      expect(events).toEqual([{ type: "screening", result: unverified, evaluatedAt: AT, smartWallets: { count: 0, elite: 0, holding: 0, conviction: 0 } }]);
+      expect("cycle" in events[0]!).toBe(false);
+    });
+
+    it("marks the creator's trades of a token the feed already forgot, when told who created it", () => {
+      const feed = new LiveFeed(1);
+      const seen: LiveTrade[] = [];
+      feed.subscribeTrades("old", (live) => seen.push(live));
+      const stored: Trade = { signature: "s", mint: "old", trader: "maker", side: "sell", solAmount: 1, tokenAmount: 10, priceSol: 0.1, timestamp: AT };
+
+      feed.tradeRecorded(stored, "maker");
+      feed.tradeRecorded({ ...stored, trader: "fan" }, "maker");
+      feed.tradeRecorded(stored);
+
+      expect(seen.map((live) => live.isDev)).toEqual([true, false, false]);
     });
   });
 });

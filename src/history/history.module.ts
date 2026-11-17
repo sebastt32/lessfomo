@@ -6,6 +6,7 @@ import type { HistoryRecorder } from "./domain/history-recorder.js";
 import type { TokenCatalogReader } from "./domain/token-catalog-reader.js";
 import type { SnapshotStore } from "../snapshots/domain/snapshot-store.js";
 import type { WalletReputationStore } from "../wallet-reputation/domain/wallet-reputation-store.js";
+import type { TokenCycleStore } from "../token-cycle/domain/token-cycle-store.js";
 import { openHistoryStore, type HistoryStore } from "./infrastructure/open-history-store.js";
 
 /** Injection token of the opened `HistoryStore`. */
@@ -20,6 +21,8 @@ export const TOKEN_CATALOG_READER = Symbol("TOKEN_CATALOG_READER");
 export const SNAPSHOT_STORE = Symbol("SNAPSHOT_STORE");
 /** Injection token of the `WalletReputationStore` port (wallet results, reputations, smart wallets). */
 export const WALLET_REPUTATION_STORE = Symbol("WALLET_REPUTATION_STORE");
+/** Injection token of the `TokenCycleStore` port (cycles of public tokens). */
+export const TOKEN_CYCLE_STORE = Symbol("TOKEN_CYCLE_STORE");
 
 /** Closes the store last, after the API stopped serving it. */
 @Injectable()
@@ -55,8 +58,17 @@ export class HistoryLifecycle implements OnApplicationShutdown {
       inject: [HISTORY_STORE],
       useFactory: (store: HistoryStore): WalletReputationStore => store.history,
     },
+    { provide: TOKEN_CYCLE_STORE, inject: [HISTORY_STORE], useFactory: (store: HistoryStore): TokenCycleStore => store.history },
     HistoryLifecycle,
   ],
-  exports: [HISTORY_STORE, HISTORY_READER, HISTORY_RECORDER, TOKEN_CATALOG_READER, SNAPSHOT_STORE, WALLET_REPUTATION_STORE],
+  exports: [
+    HISTORY_STORE,
+    HISTORY_READER,
+    HISTORY_RECORDER,
+    TOKEN_CATALOG_READER,
+    SNAPSHOT_STORE,
+    WALLET_REPUTATION_STORE,
+    TOKEN_CYCLE_STORE,
+  ],
 })
 export class HistoryModule {}

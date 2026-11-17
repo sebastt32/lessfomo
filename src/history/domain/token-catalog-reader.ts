@@ -1,11 +1,20 @@
 import type { Liquidity } from "../../momentum/domain/liquidity.js";
 import type { TokenSnapshot } from "../../snapshots/domain/assemble-snapshot.js";
 import type { SmartWalletsSummary } from "../../wallet-reputation/domain/wallet-reputation-store.js";
+import type { CyclePhase, TokenCycle } from "../../token-cycle/domain/token-cycle.js";
 import type { StoredToken, TokenHistory } from "./history-reader.js";
 
 export type SafetyStatus = TokenHistory["status"];
 export type Lifecycle = "active" | "dead";
-export type TokenSortField = "detectedAt" | "maxScore" | "peakMarketCapSol" | "liquidity" | "smartWallets" | "convictionWallets";
+export type TokenSortField =
+  | "detectedAt"
+  | "maxScore"
+  | "peakMarketCapSol"
+  | "liquidity"
+  | "smartWallets"
+  | "convictionWallets"
+  | "appearedAt"
+  | "investWindow";
 
 export interface TokenListQuery {
   /** Inclusive. */
@@ -20,6 +29,10 @@ export interface TokenListQuery {
   readonly minSmartWallets: number;
   /** Only tokens with at least this many conviction wallets at entry (decision D7); 0 or absent keeps every token. */
   readonly minConvictionWallets?: number;
+  /** Only tokens whose cycle is in one of these phases; empty or absent keeps every token. */
+  readonly phases?: readonly CyclePhase[];
+  /** Only tokens that appeared late (true) or in time (false); null or absent keeps every token. */
+  readonly appearedLate?: boolean | null;
   /** Case-insensitive match on symbol or name, or mint prefix. */
   readonly search: string | null;
   readonly sort: { readonly field: TokenSortField; readonly direction: "asc" | "desc" };
@@ -42,6 +55,8 @@ export interface TokenListEntry {
   readonly lastTradeAt: Date | null;
   readonly snapshotCount: number;
   readonly smartWallets: SmartWalletsSummary;
+  /** Absent when the token has no cycle (it never became public). */
+  readonly cycle?: TokenCycle;
 }
 
 export interface TokenList {

@@ -82,7 +82,8 @@ const screening: StoredScreening = {
   detectedAt: new Date("2026-11-13T20:01:00.000Z"),
   smartWallets: { count: 2, elite: 1, holding: 1, conviction: 1 },
 };
-const SCREENING_VIEW = { ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z", detectedAt: "2026-11-13T20:01:00.000Z" };
+// `cycle` is the additive field of docs/API.md "Token cycle": null for a token without a cycle.
+const SCREENING_VIEW = { ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z", detectedAt: "2026-11-13T20:01:00.000Z", cycle: null };
 const UNKNOWN_LIQUIDITY = { sol: null, bondingCurvePct: null, migrated: false };
 const SMART = { count: 1, elite: 0, holding: 1, conviction: 1 };
 
@@ -214,6 +215,9 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
   }
   async mintsWithConvictionWallets(mints: readonly string[]) {
     return new Set(mints.filter((mint) => this.publicMints.has(mint)));
+  }
+  async tokenCycle() {
+    return null;
   }
   closed = false;
   listQueries: TokenListQuery[] = [];
@@ -392,6 +396,7 @@ describe("API (Nest e2e)", () => {
           metrics,
           liquidity: UNKNOWN_LIQUIDITY,
           smartWallets: SMART,
+          cycle: null,
         },
       ],
     });
@@ -447,6 +452,7 @@ describe("API (Nest e2e)", () => {
       status: "failed",
       screenings: [SCREENING_VIEW],
       momentum: [{ at: "2026-11-13T20:05:00.000Z", score: 21, components, metrics }],
+      cycle: null,
     });
   });
 
@@ -648,6 +654,7 @@ describe("API (Nest e2e)", () => {
       evaluatedAt: "2026-11-13T20:02:00.000Z",
       detectedAt: "2026-11-13T20:01:00.000Z",
       smartWallets: SMART,
+      cycle: null,
     });
     expect(momentumData.at).toBe("2026-11-13T20:05:00.000Z");
     expect(momentumData.movers[0]).toMatchObject({ mint: MINT, status: "unverified", score: 21 });
@@ -866,6 +873,7 @@ describe("API (Nest e2e)", () => {
             lastTradeAt: "2026-11-13T20:30:00.000Z",
             snapshotCount: 5,
             smartWallets: { count: 3, elite: 1, holding: 2, conviction: 2 },
+            cycle: null,
           },
         ],
         page: 1,
@@ -1019,25 +1027,25 @@ describe("API (Nest e2e)", () => {
     it("maps each interval to its bucket size in seconds", async () => {
       const { history, base } = await start();
 
-      for (const interval of ["1s", "1m", "5m"]) await fetch(`${base}/api/tokens/${MINT}/candles?interval=${interval}`);
+      for (const interval of ["1s", "1m", "5m", "15m", "1h"]) await fetch(`${base}/api/tokens/${MINT}/candles?interval=${interval}`);
 
-      expect(history.chartRequests.map((r) => r.intervalSeconds)).toEqual([1, 60, 300]);
+      expect(history.chartRequests.map((r) => r.intervalSeconds)).toEqual([1, 60, 300, 900, 3600]);
     });
 
-    it("clamps the limit to 1..1000 and falls back to 300 for invalid ones", async () => {
+    it("clamps the limit to 1..2000 and falls back to 300 for invalid ones", async () => {
       const { history, base } = await start();
 
-      for (const limit of ["5000", "0", "-3", "abc", "1000", "1"]) {
+      for (const limit of ["5000", "0", "-3", "abc", "1000", "1", "1500", "2000", "2001"]) {
         await fetch(`${base}/api/tokens/${MINT}/candles?limit=${limit}`);
       }
 
-      expect(history.chartRequests.map((r) => r.limit)).toEqual([1000, 1, 1, 300, 1000, 1]);
+      expect(history.chartRequests.map((r) => r.limit)).toEqual([2000, 1, 1, 300, 1000, 1, 1500, 2000, 2000]);
     });
 
     it("answers 400 INVALID_INTERVAL for any other interval", async () => {
       const { history, base } = await start();
 
-      for (const interval of ["15m", "", "1M", "60"]) {
+      for (const interval of ["30m", "", "1M", "60", "1H", "4h"]) {
         const response = await fetch(`${base}/api/tokens/${MINT}/candles?interval=${interval}`);
         expect(response.status).toBe(400);
         expect((await response.json()).error.code).toBe("INVALID_INTERVAL");

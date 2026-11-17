@@ -75,6 +75,11 @@ export class MomentumTracker {
     return snapshots;
   }
 
+  /** The token is still followed (until the first snapshot after its window ends). */
+  isTracking(mint: string): boolean {
+    return this.tracked.has(mint);
+  }
+
   trackedCount(): number {
     return this.tracked.size;
   }

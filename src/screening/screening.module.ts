@@ -5,6 +5,7 @@ import { MarketPriceModule } from "../market-price/market-price.module.js";
 import { MomentumModule } from "../momentum/momentum.module.js";
 import { SafetyChecksModule } from "../safety-checks/safety-checks.module.js";
 import { SnapshotsModule } from "../snapshots/snapshots.module.js";
+import { TokenCycleModule } from "../token-cycle/token-cycle.module.js";
 import { TokenDiscoveryModule } from "../token-discovery/token-discovery.module.js";
 import { WalletReputationModule } from "../wallet-reputation/wallet-reputation.module.js";
 import { ScreeningPipeline } from "./screening-pipeline.js";
@@ -19,6 +20,7 @@ import { ScreeningPipeline } from "./screening-pipeline.js";
     MarketPriceModule,
     SnapshotsModule,
     WalletReputationModule,
+    TokenCycleModule,
   ],
   providers: [ScreeningPipeline],
   exports: [ScreeningPipeline],

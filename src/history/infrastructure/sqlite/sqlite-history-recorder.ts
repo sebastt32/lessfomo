@@ -123,6 +123,34 @@ import {
   userByUsernameStatement,
 } from "../auth-sql.js";
 import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
+import type { CycleSample } from "../../../token-cycle/domain/cycle-analysis.js";
+import type { CycleState, SnapshotPoint, TradeCursor, TradePoint } from "../../../token-cycle/domain/token-cycle.js";
+import type {
+  CycleBacklogCursor,
+  CycleToken,
+  FollowedCycle,
+  StoredCycle,
+  TokenCycleStore,
+} from "../../../token-cycle/domain/token-cycle-store.js";
+import { toStoredCycle } from "../token-cycle-rows.js";
+import {
+  appearanceAtStatement,
+  createCycleStatement,
+  cycleSamplesStatement,
+  cycleSnapshotsStatement,
+  cycleTokenSql,
+  cycleTradesStatement,
+  recentCyclesStatement,
+  saveCycleStatement,
+  toCycleSample,
+  toCycleToken,
+  toFollowedCycle,
+  tokenCycleSql,
+  tokenCyclesDdl,
+  tokensMissingCycleStatement,
+  toSnapshotPoints,
+  toTradePoints,
+} from "../token-cycle-sql.js";
 import {
   candlesSql,
   devTradesSql,
@@ -138,6 +166,7 @@ import {
   toToken,
   tokenValues,
   toCandle,
+  toDateOrNull,
   toDevTrade,
   tradeValues,
   type ChartDialect,
@@ -208,6 +237,7 @@ ${tokenStateDdl({ real: "REAL", time: "INTEGER" })}
 ${tokenSnapshotsDdl({ id: "INTEGER PRIMARY KEY AUTOINCREMENT", real: "REAL", time: "INTEGER" })}
 ${walletReputationDdl({ real: "REAL", time: "INTEGER" })}
 ${authDdl({ time: "INTEGER" })}
+${tokenCyclesDdl({ real: "REAL", time: "INTEGER" })}
 `;
 
 const CHART_DIALECT: ChartDialect = { param: (index) => `?${index}`, sequence: "rowid" };
@@ -216,7 +246,7 @@ const CATALOG_DIALECT: CatalogDialect = { ...CHART_DIALECT, typed: (index) => `?
 
 /** Stores and reads history in a local SQLite file using Node's built-in driver (no dependencies). */
 export class SqliteHistoryRecorder
-  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore
+  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore, TokenCycleStore
 {
   private readonly db: DatabaseSync;
   private readonly insertToken: StatementSync;
@@ -440,6 +470,51 @@ export class SqliteHistoryRecorder
 
   async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to)).map(toStoredOutcome);
+  }
+
+  async cycleToken(mint: string): Promise<CycleToken | null> {
+    const [row] = this.query(cycleTokenSql(CHART_DIALECT), mint);
+    return row === undefined ? null : toCycleToken(row);
+  }
+
+  async appearanceAt(mint: string, minConvictionWallets: number): Promise<Date | null> {
+    return toDateOrNull(this.rows(appearanceAtStatement(CATALOG_DIALECT, mint, minConvictionWallets))[0]?.["first_buy_at"]);
+  }
+
+  async createCycle(mint: string, appearedAt: Date, now: Date): Promise<{ cycle: StoredCycle; created: boolean }> {
+    const created = this.rows(createCycleStatement(CATALOG_DIALECT, mint, appearedAt, now)).length > 0;
+    const [row] = this.query(tokenCycleSql(CHART_DIALECT), mint);
+    if (row === undefined) throw new Error(`token cycle of ${mint} was not stored`);
+    return { cycle: toStoredCycle(row), created };
+  }
+
+  async tokenCycle(mint: string): Promise<StoredCycle | null> {
+    const [row] = this.query(tokenCycleSql(CHART_DIALECT), mint);
+    return row === undefined ? null : toStoredCycle(row);
+  }
+
+  async saveCycle(mint: string, state: CycleState, caughtUp: boolean, updatedAt: Date): Promise<void> {
+    this.run(saveCycleStatement(CATALOG_DIALECT, mint, state, caughtUp, updatedAt));
+  }
+
+  async cycleTrades(mint: string, after: TradeCursor | null, limit: number): Promise<TradePoint[]> {
+    return toTradePoints(this.rows(cycleTradesStatement(CATALOG_DIALECT, mint, after, limit)), after);
+  }
+
+  async cycleSnapshots(mint: string, after: Date | null, limit: number): Promise<SnapshotPoint[]> {
+    return toSnapshotPoints(this.rows(cycleSnapshotsStatement(CATALOG_DIALECT, mint, after, limit)));
+  }
+
+  async tokensMissingCycle(minConvictionWallets: number, before: CycleBacklogCursor | null, limit: number): Promise<CycleToken[]> {
+    return this.rows(tokensMissingCycleStatement(CATALOG_DIALECT, minConvictionWallets, before, limit)).map(toCycleToken);
+  }
+
+  async recentCycles(detectedAfter: Date, limit: number): Promise<FollowedCycle[]> {
+    return this.rows(recentCyclesStatement(CATALOG_DIALECT, detectedAfter, limit)).map(toFollowedCycle);
+  }
+
+  async cycleSamples(from: Date, to: Date): Promise<CycleSample[]> {
+    return this.rows(cycleSamplesStatement(CATALOG_DIALECT, from, to)).map(toCycleSample);
   }
 
   async createUser(user: NewUser): Promise<boolean> {

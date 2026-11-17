@@ -4,6 +4,7 @@ import type {
   TokenListQuery,
   TokenSortField,
 } from "../../history/domain/token-catalog-reader.js";
+import { CYCLE_PHASES, type CyclePhase } from "../../token-cycle/domain/token-cycle.js";
 import { ApiErrors } from "./api-error.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -16,6 +17,8 @@ const LIFECYCLES: readonly Lifecycle[] = ["active", "dead"];
  * accepted too, the message stays as it was.
  */
 const SORT_FIELDS: readonly TokenSortField[] = ["detectedAt", "maxScore", "peakMarketCapSol", "liquidity"];
+/** Cycle sort fields (docs/API.md "Token cycle"), accepted with `:asc` or `:desc` like the listed ones. */
+const CYCLE_SORT_FIELDS: readonly TokenSortField[] = ["appearedAt", "investWindow"];
 /** A date (UTC midnight) or a date-time with an explicit offset. */
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/;
 const INTEGER = /^\d+$/;
@@ -71,10 +74,27 @@ const parseSort = (raw: string | null): TokenListQuery["sort"] => {
   if (raw === "smartWallets" || raw === "smartWallets:desc") return { field: "smartWallets", direction: "desc" };
   if (raw === "convictionWallets" || raw === "convictionWallets:desc") return { field: "convictionWallets", direction: "desc" };
   const [field = "", direction = "desc", ...rest] = raw.split(":");
-  if (!isOneOf(SORT_FIELDS, field) || (direction !== "asc" && direction !== "desc") || rest.length > 0) {
+  if (!isOneOf([...SORT_FIELDS, ...CYCLE_SORT_FIELDS], field) || (direction !== "asc" && direction !== "desc") || rest.length > 0) {
     throw ApiErrors.invalidQuery("sort", `one of ${SORT_FIELDS.join(", ")} with :asc or :desc`);
   }
   return { field, direction };
+};
+
+/** `phase`: a comma-separated list of cycle phases. */
+const parsePhases = (raw: string | null): CyclePhase[] | null => {
+  if (raw === null) return null;
+  const phases = raw.split(",");
+  if (!phases.every((phase) => isOneOf(CYCLE_PHASES, phase))) {
+    throw ApiErrors.invalidQuery("phase", `a comma-separated list of ${CYCLE_PHASES.join(", ")}`);
+  }
+  return [...new Set(phases)];
+};
+
+/** `appearedLate`: `true` or `false`. */
+const parseAppearedLate = (raw: string | null): boolean | null => {
+  if (raw === null) return null;
+  if (raw !== "true" && raw !== "false") throw ApiErrors.invalidQuery("appearedLate", "true or false");
+  return raw === "true";
 };
 
 const parsePositiveInteger = (name: string, raw: string | null, fallback: number): number => {
@@ -110,6 +130,8 @@ export const parseTokenListQuery = (params: URLSearchParams, now: Date, publicMi
   const page = parsePositiveInteger("page", params.get("page"), 1);
   if (page < 1 || !Number.isSafeInteger(page)) throw ApiErrors.invalidQuery("page", "a positive integer");
   const pageSize = parsePositiveInteger("pageSize", params.get("pageSize"), DEFAULT_PAGE_SIZE);
+  const phases = parsePhases(params.get("phase"));
+  const appearedLate = parseAppearedLate(params.get("appearedLate"));
   return {
     from: parseInstant("from", params.get("from")),
     to: parseInstant("to", params.get("to")),
@@ -118,6 +140,9 @@ export const parseTokenListQuery = (params: URLSearchParams, now: Date, publicMi
     minScore: parseMinScore(params.get("minScore")),
     minSmartWallets: parseMinSmartWallets(params.get("minSmartWallets")),
     minConvictionWallets: parseMinConvictionWallets(params.get("minConvictionWallets"), publicMinConvictionWallets),
+    // Only present when asked for, so a query without them is exactly the one of before.
+    ...(phases !== null && { phases }),
+    ...(appearedLate !== null && { appearedLate }),
     search: parseSearch(params.get("q")),
     sort: parseSort(params.get("sort")),
     page,

@@ -23,10 +23,19 @@ import type {
 import type { SessionStore } from "../../auth/domain/session-store.js";
 import type { Session } from "../../auth/domain/user.js";
 import type { NewUser, UserStore } from "../../auth/domain/user-store.js";
+import { advanceCycle, DEFAULT_CYCLE_RULES, startCycle, summarizeCycle, tradePoints } from "../../token-cycle/domain/token-cycle.js";
+import type { TokenCycleStore } from "../../token-cycle/domain/token-cycle-store.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
-type History = HistoryRecorder & HistoryReader & SnapshotStore & TokenCatalogReader & WalletReputationStore & UserStore & SessionStore;
+type History = HistoryRecorder &
+  HistoryReader &
+  SnapshotStore &
+  TokenCatalogReader &
+  WalletReputationStore &
+  UserStore &
+  SessionStore &
+  TokenCycleStore;
 
 interface OpenedHistory {
   readonly history: History;
@@ -1334,6 +1343,303 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
       expect(await countOf("tokens")).toBe(1);
       expect(await countOf("trades")).toBe(1);
       expect(await countOf("wallet_token_results")).toBe(0);
+    });
+  });
+
+  describe("token cycles", () => {
+    const NOW = new Date("2026-11-13T21:00:00.000Z");
+    const T0 = Date.UTC(2026, 10, 13, 20, 0, 0);
+    /** A moment `seconds` after 20:00:00. */
+    const at = (seconds: number): Date => new Date(T0 + seconds * 1000);
+    let signatures = 0;
+    const tradeAt = (mint: string, seconds: number, priceSol: number): Trade => ({
+      ...trade,
+      signature: `cycle-${(signatures += 1)}`,
+      mint,
+      priceSol,
+      timestamp: at(seconds),
+    });
+    const snapshotAt = (mint: string, milestone: string, seconds: number, priceSol: number | null): TokenSnapshot => ({
+      mint,
+      milestone,
+      at: at(seconds),
+      priceSol,
+      marketCapSol: null,
+      volumeSol: null,
+      buys: null,
+      sells: null,
+      uniqueBuyers: null,
+      holders: null,
+      top10Pct: null,
+      devHoldsPct: null,
+      liquidity: { sol: null, bondingCurvePct: null, migrated: false },
+      source: "dexscreener",
+    });
+    const wallet = (name: string, seconds: number, styleAtEntry: SmartWalletEntry["styleAtEntry"] = "conviction"): SmartWalletEntry => ({
+      wallet: name,
+      tierAtEntry: "good",
+      styleAtEntry,
+      firstBuyAt: at(seconds),
+      entrySeconds: seconds,
+      boughtSol: 1,
+      soldSol: 0,
+      stillHolding: true,
+    });
+    /** A cycle that appeared 100 s in, after these `[seconds, price]` trades. */
+    const stateAfter = (...points: [number, number][]) =>
+      advanceCycle(startCycle(at(100)), tradePoints(points.map(([seconds, priceSol]) => ({ at: at(seconds), priceSol }))), DEFAULT_CYCLE_RULES);
+    const CRASHED = stateAfter([0, 1], [100, 1.6], [130, 1.8], [200, 3.2], [300, 6.4], [330, 3.2]);
+    const listQuery = (overrides: Partial<TokenListQuery> = {}): TokenListQuery => ({
+      from: null,
+      to: null,
+      statuses: [],
+      lifecycle: null,
+      minScore: null,
+      minSmartWallets: 0,
+      search: null,
+      sort: { field: "detectedAt", direction: "desc" },
+      page: 1,
+      pageSize: 50,
+      now: NOW,
+      ...overrides,
+    });
+
+    it("stores when a token appeared once and never changes it", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+
+      const first = await history.createCycle("a", at(100), NOW);
+      const second = await history.createCycle("a", at(500), new Date(NOW.getTime() + 1000));
+      await history.saveCycle("a", { ...CRASHED, appearedAt: at(900) }, true, NOW);
+
+      expect(first).toEqual({ created: true, cycle: { state: startCycle(at(100)), caughtUp: false, updatedAt: NOW } });
+      expect(second).toEqual({ created: false, cycle: first.cycle });
+      expect((await history.tokenCycle("a"))?.state.appearedAt).toEqual(at(100));
+      expect(await history.tokenCycle("ghost")).toBeNull();
+    });
+
+    it("keeps the whole cycle, to continue it after a restart", async () => {
+      const history = await open();
+      await history.createCycle("a", at(100), NOW);
+      const state = { ...CRASHED, snapshotCursorAt: at(4000) };
+      const later = new Date(NOW.getTime() + 5000);
+
+      await history.saveCycle("a", state, true, later);
+
+      expect(await history.tokenCycle("a")).toEqual({ state, caughtUp: true, updatedAt: later });
+      const reopened = await reopenLast();
+      expect(await reopened.tokenCycle("a")).toEqual({ state, caughtUp: true, updatedAt: later });
+      // Folding the stored cycle again gives the same cycle as before the restart.
+      const more = tradePoints([{ at: at(400), priceSol: 1.6 }]);
+      expect(advanceCycle((await reopened.tokenCycle("a"))!.state, more, DEFAULT_CYCLE_RULES)).toEqual(advanceCycle(state, more, DEFAULT_CYCLE_RULES));
+    });
+
+    it("finds when a token appeared: the first buy of the conviction wallet that reached the minimum", async () => {
+      const history = await open();
+      await history.saveSmartWallet("a", wallet("w1", 40));
+      await history.saveSmartWallet("a", wallet("flipper", 50, "flipper"));
+      await history.saveSmartWallet("a", wallet("w3", 90));
+      await history.saveSmartWallet("a", wallet("w2", 70));
+      await history.saveSmartWallet("b", wallet("w1", 10));
+
+      expect(await history.appearanceAt("a", 1)).toEqual(at(40));
+      expect(await history.appearanceAt("a", 2)).toEqual(at(70));
+      expect(await history.appearanceAt("a", 3)).toEqual(at(90));
+      expect(await history.appearanceAt("a", 4)).toBeNull();
+      expect(await history.appearanceAt("ghost", 1)).toBeNull();
+    });
+
+    it("reads the token of a cycle, or null when it was never stored", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { creator: "maker", detectedAt: at(5) }));
+
+      expect(await history.cycleToken("a")).toEqual({ mint: "a", creator: "maker", detectedAt: at(5) });
+      expect(await history.cycleToken("ghost")).toBeNull();
+    });
+
+    it("reads the trades after a cursor oldest first, numbered in insertion order inside a second", async () => {
+      const history = await open();
+      await history.recordTrade(tradeAt("a", 61, 4));
+      for (const priceSol of [1, 2, 3]) await history.recordTrade(tradeAt("a", 60, priceSol));
+      await history.recordTrade(tradeAt("b", 60, 99));
+      const point = (seconds: number, priceSol: number, ordinal: number) => ({ kind: "trade", at: at(seconds), priceSol, ordinal });
+
+      expect(await history.cycleTrades("a", null, 10)).toEqual([point(60, 1, 0), point(60, 2, 1), point(60, 3, 2), point(61, 4, 0)]);
+      expect(await history.cycleTrades("a", null, 2)).toEqual([point(60, 1, 0), point(60, 2, 1)]);
+      expect(await history.cycleTrades("a", { at: at(60), count: 2 }, 10)).toEqual([point(60, 3, 2), point(61, 4, 0)]);
+      expect(await history.cycleTrades("a", { at: at(61), count: 1 }, 10)).toEqual([]);
+
+      // A trade stored later with the cursor's timestamp is still read, after the ones already folded.
+      await history.recordTrade(tradeAt("a", 60, 5));
+      expect(await history.cycleTrades("a", { at: at(60), count: 3 }, 10)).toEqual([point(60, 5, 3), point(61, 4, 0)]);
+    });
+
+    it("folds a token's stored trades batch by batch into the same cycle as all at once", async () => {
+      const history = await open();
+      const prices: [number, number][] = [[0, 1], [100, 1.6], [130, 1.8], [200, 3.2], [200, 4], [200, 6.4], [330, 3.2], [400, 1.6]];
+      for (const [seconds, priceSol] of prices) await history.recordTrade(tradeAt("a", seconds, priceSol));
+
+      let state = startCycle(at(100));
+      for (;;) {
+        const batch = await history.cycleTrades("a", state.tradeCursor, 2);
+        if (batch.length === 0) break;
+        state = advanceCycle(state, batch, DEFAULT_CYCLE_RULES);
+      }
+
+      expect(state).toEqual(advanceCycle(startCycle(at(100)), await history.cycleTrades("a", null, 100), DEFAULT_CYCLE_RULES));
+      expect(summarizeCycle(state, NOW)).toMatchObject({ phase: "crashed", explosionAt: at(200), peakX: 4, crashAt: at(330), investWindowSeconds: 30 });
+    });
+
+    it("reads the snapshot prices after a moment, oldest first, one per moment, skipping unpriced ones", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      await history.saveSnapshot(snapshotAt("a", "d2", 7000, 9), {});
+      await history.saveSnapshot(snapshotAt("a", "1h", 3600, 5), {});
+      await history.saveSnapshot(snapshotAt("a", "event:migrated", 3600, 5), {});
+      await history.saveSnapshot(snapshotAt("a", "2h", 5000, null), {});
+      await history.saveSnapshot(snapshotAt("b", "1h", 3600, 77), {});
+
+      expect(await history.cycleSnapshots("a", null, 10)).toEqual([
+        { kind: "snapshot", at: at(3600), priceSol: 5 },
+        { kind: "snapshot", at: at(7000), priceSol: 9 },
+      ]);
+      expect(await history.cycleSnapshots("a", at(3600), 10)).toEqual([{ kind: "snapshot", at: at(7000), priceSol: 9 }]);
+      expect(await history.cycleSnapshots("a", null, 1)).toEqual([{ kind: "snapshot", at: at(3600), priceSol: 5 }]);
+    });
+
+    it("lists the public tokens without a caught-up cycle, newest first, page by page", async () => {
+      const history = await open();
+      const detected = { old: at(-3000), mid: at(-2000), new: at(-1000) };
+      await history.recordToken(token("a", { detectedAt: detected.old }));
+      await history.recordToken(token("b", { detectedAt: detected.mid }));
+      await history.recordToken(token("c", { detectedAt: detected.mid }));
+      await history.recordToken(token("d", { detectedAt: detected.new, creator: "maker" }));
+      await history.recordToken(token("e", { detectedAt: detected.new }));
+      await history.recordToken(token("f", { detectedAt: detected.new }));
+      for (const mint of ["a", "b", "c", "d", "e"]) {
+        await history.saveSmartWallet(mint, wallet("w1", 10));
+        await history.saveSmartWallet(mint, wallet("w2", 20));
+      }
+      // "f" has one conviction wallet only; "e" already has a caught-up cycle; "b" has one still catching up.
+      await history.saveSmartWallet("f", wallet("w1", 10));
+      await history.createCycle("e", at(20), NOW);
+      await history.saveCycle("e", startCycle(at(20)), true, NOW);
+      await history.createCycle("b", at(20), NOW);
+
+      const all = await history.tokensMissingCycle(2, null, 10);
+      expect(all).toEqual([
+        { mint: "d", creator: "maker", detectedAt: detected.new },
+        { mint: "b", creator: "dev", detectedAt: detected.mid },
+        { mint: "c", creator: "dev", detectedAt: detected.mid },
+        { mint: "a", creator: "dev", detectedAt: detected.old },
+      ]);
+      const firstPage = await history.tokensMissingCycle(2, null, 2);
+      expect(firstPage.map((t) => t.mint)).toEqual(["d", "b"]);
+      expect((await history.tokensMissingCycle(2, firstPage[1]!, 2)).map((t) => t.mint)).toEqual(["c", "a"]);
+      expect(await history.tokensMissingCycle(2, all[3]!, 2)).toEqual([]);
+      expect((await history.tokensMissingCycle(1, null, 10)).map((t) => t.mint)).toEqual(["d", "f", "b", "c", "a"]);
+      expect(await history.tokensMissingCycle(3, null, 10)).toEqual([]);
+    });
+
+    it("lists the cycles of tokens detected after a moment, most recently appeared first", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: at(0) }));
+      await history.recordToken(token("b", { detectedAt: at(50), creator: "maker" }));
+      await history.recordToken(token("c", { detectedAt: at(-100) }));
+      await history.createCycle("a", at(300), NOW);
+      await history.createCycle("b", at(200), NOW);
+      await history.createCycle("c", at(400), NOW);
+      await history.createCycle("unstored", at(500), NOW);
+
+      expect(await history.recentCycles(at(-1), 10)).toEqual([
+        { mint: "a", creator: "dev", detectedAt: at(0), appearedAt: at(300) },
+        { mint: "b", creator: "maker", detectedAt: at(50), appearedAt: at(200) },
+      ]);
+      expect((await history.recentCycles(at(-200), 2)).map((c) => c.mint)).toEqual(["c", "a"]);
+      expect(await history.recentCycles(at(50), 10)).toEqual([]);
+    });
+
+    it("returns what the analysis needs of the cycles that appeared in a range", async () => {
+      const history = await open();
+      const late = stateAfter([0, 1], [40, 2], [100, 2.4]);
+      for (const [mint, appeared] of [["a", 100], ["b", 100], ["c", 100], ["d", 100]] as const) await history.createCycle(mint, at(appeared), NOW);
+      await history.saveCycle("a", CRASHED, true, NOW);
+      await history.saveCycle("b", late, true, NOW);
+      await history.createCycle("early", at(99), NOW);
+      await history.createCycle("after", at(200), NOW);
+
+      const samples = await history.cycleSamples(at(100), at(200));
+
+      expect(samples).toEqual([
+        { appearedAt: at(100), appearedLate: false, explosionAt: at(200), investWindowSeconds: 30, peakAt: at(300), peakX: 4, crashAt: at(330) },
+        { appearedAt: at(100), appearedLate: true, explosionAt: null, investWindowSeconds: -60, peakAt: null, peakX: null, crashAt: null },
+        { appearedAt: at(100), appearedLate: false, explosionAt: null, investWindowSeconds: null, peakAt: null, peakX: null, crashAt: null },
+        { appearedAt: at(100), appearedLate: false, explosionAt: null, investWindowSeconds: null, peakAt: null, peakX: null, crashAt: null },
+      ]);
+      expect(await history.cycleSamples(at(500), at(600))).toEqual([]);
+    });
+
+    it("lists tokens with their cycle, filtered by phase and lateness and sorted by appearance or window", async () => {
+      const history = await open();
+      const exploding = stateAfter([0, 1], [100, 1.6], [180, 1.7], [200, 3.2]);
+      const late = stateAfter([0, 1], [40, 2], [100, 2.4]);
+      for (const [index, mint] of ["a", "b", "c", "d", "e"].entries()) await history.recordToken(token(mint, { detectedAt: at(-index) }));
+      await history.createCycle("a", at(100), NOW);
+      await history.saveCycle("a", CRASHED, true, NOW);
+      await history.createCycle("b", at(100), NOW);
+      await history.saveCycle("b", exploding, true, NOW);
+      await history.createCycle("c", at(100), NOW);
+      await history.saveCycle("c", late, true, NOW);
+      await history.createCycle("d", at(250), NOW);
+      const mints = async (overrides: Partial<TokenListQuery>) => (await history.listTokens(listQuery(overrides))).tokens.map((entry) => entry.token.mint);
+
+      const { tokens, total } = await history.listTokens(listQuery());
+      expect(total).toBe(5);
+      expect(tokens.map((entry) => entry.cycle ?? null)).toEqual([
+        summarizeCycle(CRASHED, NOW),
+        summarizeCycle(exploding, NOW),
+        summarizeCycle(late, NOW),
+        summarizeCycle(startCycle(at(250)), NOW),
+        null,
+      ]);
+      expect(await mints({ phases: ["crashed"] })).toEqual(["a"]);
+      expect(await mints({ phases: ["exploding", "stable"] })).toEqual(["b", "c", "d"]);
+      expect(await mints({ appearedLate: true })).toEqual(["c"]);
+      expect(await mints({ appearedLate: false })).toEqual(["a", "b", "d"]);
+      expect(await mints({ phases: ["stable"], appearedLate: false })).toEqual(["d"]);
+      expect((await history.listTokens(listQuery({ phases: ["stable"] }))).total).toBe(2);
+      // Tokens without a cycle, or without a window yet, come last.
+      expect(await mints({ sort: { field: "appearedAt", direction: "desc" } })).toEqual(["d", "a", "b", "c", "e"]);
+      expect(await mints({ sort: { field: "appearedAt", direction: "asc" } })).toEqual(["a", "b", "c", "d", "e"]);
+      expect(await mints({ sort: { field: "investWindow", direction: "desc" } })).toEqual(["b", "a", "c", "d", "e"]);
+      expect(await mints({ sort: { field: "investWindow", direction: "asc" } })).toEqual(["c", "a", "b", "d", "e"]);
+    });
+
+    it("creates the cycle table on an existing database without touching its data", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      await history.recordTrade(trade);
+      await history.recordScreening(failed("a"), NOW);
+      await history.saveSmartWallet("a", wallet("w1", 10));
+      const dump = async (store: History) => ({
+        tokens: await store.listTokens(listQuery()),
+        trades: await store.tokenTrades("a"),
+        screenings: await store.recentScreenings(10),
+        smartWallets: await store.tokenSmartWallets("a"),
+      });
+      const before = await dump(history);
+      await execOnLast("DROP TABLE token_cycles");
+
+      const migrated = await reopenLast();
+      expect(await dump(migrated)).toEqual(before);
+      await migrated.createCycle("a", at(100), NOW);
+      const again = await reopenLast();
+
+      expect(await again.tokenCycle("a")).toMatchObject({ caughtUp: false, state: { appearedAt: at(100) } });
+      expect(await again.tokenTrades("a")).toEqual(before.trades);
+      expect(await countOf("tokens")).toBe(1);
+      expect(await countOf("trades")).toBe(1);
+      expect(await countOf("token_cycles")).toBe(1);
     });
   });
 

@@ -29,6 +29,7 @@ import {
   type Row,
   type SqlValue,
 } from "./history-rows.js";
+import { CYCLE_LIST_COLUMNS, toListCycle } from "./token-cycle-rows.js";
 
 /**
  * SQL and row mapping of the token catalog (`token_state`) and its snapshots (`token_snapshots`),
@@ -402,6 +403,8 @@ const SORT_COLUMNS: Readonly<Record<TokenSortField, string>> = {
   liquidity: "s.liquidity_sol",
   smartWallets: "w.wallets",
   convictionWallets: "w.conviction",
+  appearedAt: "c.appeared_at",
+  investWindow: "c.invest_window_seconds",
 };
 
 const escapeLike = (text: string): string => text.replace(/[\\%_]/g, (character) => `\\${character}`);
@@ -431,6 +434,11 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
     if (query.minSmartWallets > 0) where.push(`w.wallets >= ${params.add(query.minSmartWallets, "integer")}`);
     const minConviction = query.minConvictionWallets ?? 0;
     if (minConviction > 0) where.push(`w.conviction >= ${params.add(minConviction, "integer")}`);
+    const phases = query.phases ?? [];
+    if (phases.length > 0) where.push(`c.phase IN (${phases.map((phase) => params.add(phase)).join(", ")})`);
+    if (query.appearedLate !== undefined && query.appearedLate !== null) {
+      where.push(`c.appeared_late = ${params.add(query.appearedLate ? 1 : 0, "integer")}`);
+    }
     if (query.search !== null) {
       const text = escapeLike(query.search.toLowerCase());
       const contains = params.add(`%${text}%`);
@@ -439,7 +447,7 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
         `(LOWER(t.symbol) LIKE ${contains} ESCAPE '\\' OR LOWER(t.name) LIKE ${contains} ESCAPE '\\' OR LOWER(t.mint) LIKE ${prefix} ESCAPE '\\')`,
       );
     }
-    const from = `FROM tokens t LEFT JOIN token_state s ON s.mint = t.mint LEFT JOIN smart_wallet_tokens w ON w.mint = t.mint${
+    const from = `FROM tokens t LEFT JOIN token_state s ON s.mint = t.mint LEFT JOIN smart_wallet_tokens w ON w.mint = t.mint LEFT JOIN token_cycles c ON c.mint = t.mint${
       where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""
     }`;
     if (forCount) return { sql: `SELECT COUNT(*) AS n ${from}`, params: params.values };
@@ -449,7 +457,8 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
     SELECT t.*, COALESCE(s.status, 'pending') AS status_now, ${lifecycle()} AS lifecycle_now,
            s.max_score, s.holders, s.liquidity_sol, s.bonding_curve_pct, s.migrated,
            s.last_price_sol, s.peak_price_sol, s.last_trade_at,
-           (SELECT COUNT(*) FROM token_snapshots x WHERE x.mint = t.mint) AS snapshot_count, ${SMART_SUMMARY_COLUMNS}
+           (SELECT COUNT(*) FROM token_snapshots x WHERE x.mint = t.mint) AS snapshot_count, ${SMART_SUMMARY_COLUMNS},
+           ${CYCLE_LIST_COLUMNS}
     ${from}
     ORDER BY ${SORT_COLUMNS[query.sort.field]} ${direction} NULLS LAST, t.detected_at DESC, t.mint ASC
     LIMIT ${params.add(query.pageSize)} OFFSET ${params.add((query.page - 1) * query.pageSize)}`;
@@ -462,7 +471,12 @@ const toStatus = (value: unknown): SafetyStatus =>
   value === "passed" || value === "failed" || value === "unverified" ? value : "pending";
 const toLifecycle = (value: unknown): Lifecycle => (value === "dead" ? "dead" : "active");
 
-export const toTokenListEntry = (row: Row): TokenListEntry => ({
+export const toTokenListEntry = (row: Row): TokenListEntry => {
+  const cycle = toListCycle(row);
+  return { ...toTokenListEntryWithoutCycle(row), ...(cycle !== null && { cycle }) };
+};
+
+const toTokenListEntryWithoutCycle = (row: Row): TokenListEntry => ({
   token: toToken(row),
   status: toStatus(row["status_now"]),
   lifecycle: toLifecycle(row["lifecycle_now"]),

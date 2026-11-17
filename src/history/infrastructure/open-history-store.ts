@@ -6,11 +6,12 @@ import { errorMessage } from "../../shared/error-message.js";
 import type { WalletReputationStore } from "../../wallet-reputation/domain/wallet-reputation-store.js";
 import type { SessionStore } from "../../auth/domain/session-store.js";
 import type { UserStore } from "../../auth/domain/user-store.js";
+import type { TokenCycleStore } from "../../token-cycle/domain/token-cycle-store.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
 export interface History
-  extends HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore {
+  extends HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore, TokenCycleStore {
   close(): Promise<void>;
 }
 
