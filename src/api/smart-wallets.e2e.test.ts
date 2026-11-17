@@ -140,7 +140,8 @@ describe("smart wallets API", () => {
       [X, { count: 1, elite: 0, holding: 1 }],
     ]);
     expect(sorted.body.tokens[0].token.mint).toBe(X);
-    expect((await get("/api/tokens?minSmartWallets=-1")).body.error.code).toBe("INVALID_QUERY");
+    expect((await get("/api/tokens?minSmartWallets=-1")).body.total).toBe(1);
+    expect((await get("/api/tokens?minSmartWallets=1.5")).body.error.code).toBe("INVALID_QUERY");
   });
 
   it("filters screenings by the same point-in-time count and includes it in each one", async () => {

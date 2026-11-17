@@ -27,6 +27,8 @@ const report = (error: unknown): void => console.error(`[reputation] ${errorMess
       useFactory: (config: AppConfig, feed: LiveFeed, store: WalletReputationStore): SmartWalletTracker =>
         new SmartWalletTracker({
           trackingWindowMs: config.momentum.trackingWindowMs,
+          rules: config.walletReputation.rules,
+          statsAtBuys: (buys, excludedMint) => store.statsAtBuys(buys, config.walletReputation.rules.lookbackMs, excludedMint),
           onChange: (change) => feed.smartWalletChanged(change),
           persist: (mint, entry) => {
             try {
@@ -49,6 +51,7 @@ const report = (error: unknown): void => console.error(`[reputation] ${errorMess
           batchSize: config.walletReputation.batchSize,
           startDelayMs: config.walletReputation.startDelayMs,
           onRecords: (records) => tracker.updateRecords(records),
+          onClosedThrough: (completeThrough, closed) => tracker.rateThrough(completeThrough, closed),
           log: (line) => console.log(line),
           onError: report,
         }),

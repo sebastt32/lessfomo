@@ -80,7 +80,6 @@ describe("parseTokenListQuery", () => {
     ["page=1.5", "page"],
     ["pageSize=ten", "pageSize"],
     [`q=${"x".repeat(101)}`, "q"],
-    ["minSmartWallets=-1", "minSmartWallets"],
     ["minSmartWallets=1.5", "minSmartWallets"],
     ["minSmartWallets=two", "minSmartWallets"],
     ["minSmartWallets=", "minSmartWallets"],
@@ -96,6 +95,8 @@ describe("parseTokenListQuery", () => {
   it("reads minSmartWallets as an integer, 1 by default, treating values below 1 as 1", () => {
     expect(parse("").minSmartWallets).toBe(1);
     expect(parse("minSmartWallets=0").minSmartWallets).toBe(1);
+    expect(parse("minSmartWallets=-1").minSmartWallets).toBe(1);
+    expect(parse("minSmartWallets=-25").minSmartWallets).toBe(1);
     expect(parse("minSmartWallets=3").minSmartWallets).toBe(3);
   });
 
@@ -105,6 +106,6 @@ describe("parseTokenListQuery", () => {
     expect(rejection("sort=smartWallets:asc").message).toBe(
       'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
     );
-    expect(rejection("minSmartWallets=-1").message).toBe('Invalid query parameter "minSmartWallets": expected an integer of at least 1');
+    expect(rejection("minSmartWallets=1.5").message).toBe('Invalid query parameter "minSmartWallets": expected an integer');
   });
 });

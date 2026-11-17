@@ -16,6 +16,7 @@ const SORT_FIELDS: readonly TokenSortField[] = ["detectedAt", "maxScore", "peakM
 /** A date (UTC midnight) or a date-time with an explicit offset. */
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/;
 const INTEGER = /^\d+$/;
+const SIGNED_INTEGER = /^-?\d+$/;
 
 const isOneOf = <T extends string>(values: readonly T[], value: string): value is T =>
   (values as readonly string[]).includes(value);
@@ -82,13 +83,13 @@ const parsePositiveInteger = (name: string, raw: string | null, fallback: number
 const MIN_PUBLIC_SMART_WALLETS = 1;
 
 /**
- * `minSmartWallets`: a non-negative integer (default 1); values below 1 are treated as 1 because of
- * the public visibility rule. Anything else is 400 INVALID_QUERY.
+ * `minSmartWallets`: an integer (default 1); integers below 1 (0, negatives) are treated as 1
+ * because of the public visibility rule. Anything else is 400 INVALID_QUERY.
  */
 export const parseMinSmartWallets = (raw: string | null): number => {
   if (raw === null) return MIN_PUBLIC_SMART_WALLETS;
-  const value = INTEGER.test(raw) ? Number(raw) : Number.NaN;
-  if (!Number.isSafeInteger(value)) throw ApiErrors.invalidQuery("minSmartWallets", "an integer of at least 1");
+  const value = SIGNED_INTEGER.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(value)) throw ApiErrors.invalidQuery("minSmartWallets", "an integer");
   return Math.max(MIN_PUBLIC_SMART_WALLETS, value);
 };
 

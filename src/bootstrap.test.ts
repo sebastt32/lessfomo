@@ -92,6 +92,9 @@ class FakeHistory {
   updateMarkets = async (): Promise<void> => undefined;
   smartWallets: string[] = [];
   saveSmartWallet = async (mint: string, entry: { wallet: string }): Promise<void> => void this.smartWallets.push(`${mint}:${entry.wallet}`);
+  /** "fan" has good point-in-time stats at every buy. */
+  statsAtBuys = async (buys: readonly { wallet: string }[]) =>
+    new Map(buys.filter(({ wallet }) => wallet === "fan").map(({ wallet }) => [wallet, { tokens: 5, wins: 4, netPnlSol: 2 }] as const));
   close = async (): Promise<void> => {
     this.onClose();
     events.push("history.close");
@@ -203,6 +206,8 @@ describe("lessfomo app wiring", () => {
     tokens.emit(token);
     trades.emit(trade);
     trades.emit({ ...trade, mint: "Untracked1111111111111111111111111", signature: "other" });
+    // The reputation closer rates live buys once every result closed before them is stored.
+    await running.get<SmartWalletTracker>(SMART_WALLET_TRACKER).rateThrough(new Date(Date.now() + 60 * 60_000));
     await until(() => logs.some((line) => line.startsWith("[momentum]")) && history.screenings.length > 0);
 
     expect(history.tokens).toEqual([MINT]);

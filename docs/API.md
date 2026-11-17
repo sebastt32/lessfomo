@@ -311,8 +311,8 @@ keep using every stored token.
 
 ### Smart-wallet filters
 
-`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (integer ≥ 1, default `1`; values
-below 1 are treated as 1 because of the visibility rule) and
+`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (an integer, default `1`; integers
+below 1 are treated as 1 because of the visibility rule; non-integers → `400 INVALID_QUERY`) and
 `/api/tokens` also accepts `sort=smartWallets:desc`. `GET /api/screenings` accepts `minSmartWallets`
 too. Invalid values → `400 INVALID_QUERY`. Live SSE events are unchanged; clients filter `momentum`
 movers by `smartWallets.count`, and a new SSE event on `/api/stream` reports changes:

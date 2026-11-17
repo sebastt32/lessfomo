@@ -68,14 +68,26 @@ export interface TokenResults {
 }
 
 /**
+ * Trades strictly before `closedAt`, the end of the token's window (decision D2: nothing after the
+ * close counts, however late the close runs). Trades are ordered oldest first, so this is a prefix
+ * and trade indices keep their meaning.
+ */
+export const tradesBefore = <T extends Pick<ObservedTrade, "timestamp">>(trades: readonly T[], closedAt: Date): T[] => {
+  const end = closedAt.getTime();
+  return trades.filter(({ timestamp }) => timestamp.getTime() < end);
+};
+
+/**
  * Result of every wallet that bought the token (its creator excluded, decision D1), from the
- * token's trades ordered oldest first.
+ * token's trades ordered oldest first; trades at or after `closedAt` are ignored and the
+ * remaining tokens are valued at the last price before it.
  */
 export const closeTokenResults = (
-  trades: readonly ObservedTrade[],
+  allTrades: readonly ObservedTrade[],
   token: { readonly creator: string; readonly detectedAt: Date },
   closedAt: Date,
 ): TokenResults => {
+  const trades = tradesBefore(allTrades, closedAt);
   const lastPriceSol = trades.at(-1)?.priceSol ?? null;
   const positions = foldPositions(trades, token.creator);
   const results = [...positions.values()].map((position) => ({

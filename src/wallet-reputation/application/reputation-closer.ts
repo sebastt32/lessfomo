@@ -1,7 +1,7 @@
 import type { ClosedResult } from "../domain/closed-result.js";
 import { tierOf, walletRecord, type ReputationRules, type WalletRecord } from "../domain/reputation-rules.js";
 import { DEFAULT_OUTCOME_RULES, tokenOutcome, type OutcomeRules } from "../domain/smart-wallet-outcome.js";
-import { closeTokenResults, isHolding } from "../domain/wallet-positions.js";
+import { closeTokenResults, isHolding, tradesBefore } from "../domain/wallet-positions.js";
 import type { ClosableToken, SmartWalletEntry, WalletReputationStore } from "../domain/wallet-reputation-store.js";
 
 export interface ReputationCloserOptions {
@@ -25,8 +25,13 @@ export interface ReputationCloserOptions {
   readonly busyIntervalMs?: number;
   readonly idleIntervalMs?: number;
   readonly clock?: () => Date;
-  /** Receives every refreshed record (to keep the live tiers current). */
+  /** Receives every refreshed record (to describe live smart wallets; never to rate them). */
   readonly onRecords?: (records: readonly WalletRecord[]) => void;
+  /**
+   * After each tick: every result closed up to `completeThrough` is stored (null while there is
+   * a backlog), and the tokens closed since the last call. Live buys are rated from here.
+   */
+  readonly onClosedThrough?: (completeThrough: Date | null, closed: readonly string[]) => Promise<void> | void;
   readonly log?: (line: string) => void;
   readonly onError?: (error: unknown) => void;
 }
@@ -80,8 +85,12 @@ export class ReputationCloser {
     await this.running?.catch(() => undefined);
   }
 
+  /** Pushes the stored good-or-elite records that are still fresh; older ones are refreshed before they are pushed. */
   async loadRecords(): Promise<void> {
-    const records = await this.options.store.smartWalletRecords(this.options.maxRecords ?? 200_000);
+    const freshSince = this.clock().getTime() - this.staleAfterMs();
+    const records = (await this.options.store.smartWalletRecords(this.options.maxRecords ?? 200_000)).filter(
+      ({ updatedAt }) => updatedAt.getTime() >= freshSince,
+    );
     this.options.onRecords?.(records);
     this.options.log?.(`[reputation] loaded ${records.length} good or elite wallet(s)`);
   }
@@ -92,17 +101,22 @@ export class ReputationCloser {
     const now = this.clock();
     const upTo = new Date(now.getTime() - trackingWindowMs - (this.options.closeGraceMs ?? 30_000));
     const tokens = await store.closableTokens(this.watermark, upTo, batchSize);
+    const closed: string[] = [];
     for (const token of tokens) {
       await this.closeToken(token);
+      closed.push(token.mint);
       const mark = new Date(token.detectedAt.getTime() - WATERMARK_MARGIN_MS);
       if (this.watermark === null || mark > this.watermark) this.watermark = mark;
     }
     const backlog = tokens.length === batchSize;
+    // Without a backlog every token detected up to `upTo` is closed: results up to its window end are all stored.
+    await this.options.onClosedThrough?.(backlog ? null : new Date(upTo.getTime() + trackingWindowMs), closed);
 
     const refreshBatch = this.options.refreshBatch ?? 1_000;
-    let wallets = [...this.dirty].slice(0, refreshBatch);
-    if (wallets.length === 0 && !backlog) {
-      wallets = await store.staleWallets(new Date(now.getTime() - (this.options.staleAfterMs ?? 60 * 60_000)), refreshBatch);
+    const wallets = [...this.dirty].slice(0, refreshBatch);
+    if (wallets.length < refreshBatch && !backlog) {
+      const stale = await store.staleWallets(new Date(now.getTime() - this.staleAfterMs()), refreshBatch - wallets.length);
+      for (const wallet of stale) if (!this.dirty.has(wallet)) wallets.push(wallet);
     }
     await this.refresh(wallets, now);
 
@@ -110,10 +124,15 @@ export class ReputationCloser {
     return { closed: tokens.length, refreshed: wallets.length, backlog };
   }
 
+  private staleAfterMs(): number {
+    return this.options.staleAfterMs ?? 60 * 60_000;
+  }
+
   private async closeToken(token: ClosableToken): Promise<void> {
     const { store, rules } = this.options;
     const closedAt = new Date(token.detectedAt.getTime() + this.options.trackingWindowMs);
-    const trades = await store.tokenTrades(token.mint);
+    // Only trades inside the window count, so the close is the same whenever this tick runs.
+    const trades = tradesBefore(await store.tokenTrades(token.mint), closedAt);
     const { results, positions } = closeTokenResults(trades, token, closedAt);
     const stats =
       results.length === 0
