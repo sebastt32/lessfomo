@@ -79,22 +79,20 @@ const parsePositiveInteger = (name: string, raw: string | null, fallback: number
   return Number(raw);
 };
 
-/** Only tokens bought by a good-or-elite wallet are public, so fewer than 1 means 1. */
-const MIN_PUBLIC_SMART_WALLETS = 1;
-
 /**
- * `minSmartWallets`: an integer (default 1); integers below 1 (0, negatives) are treated as 1
- * because of the public visibility rule. Anything else is 400 INVALID_QUERY.
+ * `minSmartWallets`: an integer (default `publicMin`, the configured `PUBLIC_MIN_SMART_WALLETS`);
+ * integers below `publicMin` are treated as `publicMin` because of the public visibility rule.
+ * Anything else is 400 INVALID_QUERY.
  */
-export const parseMinSmartWallets = (raw: string | null): number => {
-  if (raw === null) return MIN_PUBLIC_SMART_WALLETS;
+export const parseMinSmartWallets = (raw: string | null, publicMin: number): number => {
+  if (raw === null) return publicMin;
   const value = SIGNED_INTEGER.test(raw) ? Number(raw) : Number.NaN;
   if (!Number.isSafeInteger(value)) throw ApiErrors.invalidQuery("minSmartWallets", "an integer");
-  return Math.max(MIN_PUBLIC_SMART_WALLETS, value);
+  return Math.max(publicMin, value);
 };
 
 /** Reads `GET /api/tokens` parameters (first value of each), or throws 400 INVALID_QUERY naming the bad one. */
-export const parseTokenListQuery = (params: URLSearchParams, now: Date): TokenListQuery => {
+export const parseTokenListQuery = (params: URLSearchParams, now: Date, publicMinSmartWallets: number): TokenListQuery => {
   const page = parsePositiveInteger("page", params.get("page"), 1);
   if (page < 1 || !Number.isSafeInteger(page)) throw ApiErrors.invalidQuery("page", "a positive integer");
   const pageSize = parsePositiveInteger("pageSize", params.get("pageSize"), DEFAULT_PAGE_SIZE);
@@ -104,7 +102,7 @@ export const parseTokenListQuery = (params: URLSearchParams, now: Date): TokenLi
     statuses: parseStatuses(params.get("status")),
     lifecycle: parseLifecycle(params.get("lifecycle")),
     minScore: parseMinScore(params.get("minScore")),
-    minSmartWallets: parseMinSmartWallets(params.get("minSmartWallets")),
+    minSmartWallets: parseMinSmartWallets(params.get("minSmartWallets"), publicMinSmartWallets),
     search: parseSearch(params.get("q")),
     sort: parseSort(params.get("sort")),
     page,

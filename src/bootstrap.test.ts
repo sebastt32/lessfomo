@@ -102,7 +102,7 @@ class FakeHistory {
 }
 
 const testConfig = (port: number): AppConfig => {
-  const config = loadAppConfig({ API_PORT: String(port) }, new Date("2026-11-13T20:00:00.000Z"));
+  const config = loadAppConfig({ API_PORT: String(port), PUBLIC_MIN_SMART_WALLETS: "1" }, new Date("2026-11-13T20:00:00.000Z"));
   return {
     ...config,
     api: { ...config.api, port },

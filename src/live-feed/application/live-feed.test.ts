@@ -44,14 +44,14 @@ const AT = new Date("2026-11-13T20:05:00.000Z");
 
 describe("LiveFeed", () => {
   it("starts with no movers and every source connecting", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
 
     expect(feed.getMovers(20)).toEqual({ at: null, movers: [] });
     expect(feed.getSources()).toEqual({ pumpportal: "connecting", solanaLogs: "connecting" });
   });
 
   it("ranks movers by score with their token and safety status", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     feed.tokenDetected(token("a"));
     feed.tokenDetected(token("b"));
     const failed: ScreeningResult = {
@@ -72,7 +72,7 @@ describe("LiveFeed", () => {
   });
 
   it("limits the number of movers returned", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     for (const mint of ["a", "b", "c"]) feed.tokenDetected(token(mint));
     feed.momentumUpdated([snapshot("a", 1, AT), snapshot("b", 2, AT), snapshot("c", 3, AT)], AT);
 
@@ -80,7 +80,7 @@ describe("LiveFeed", () => {
   });
 
   it("skips snapshots of tokens it has never seen", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
 
     feed.momentumUpdated([snapshot("ghost", 99, AT)], AT);
 
@@ -88,7 +88,7 @@ describe("LiveFeed", () => {
   });
 
   it("notifies subscribers of every event until they unsubscribe", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     const events: LiveEvent["type"][] = [];
     const unsubscribe = feed.subscribe((event) => events.push(event.type));
 
@@ -103,7 +103,7 @@ describe("LiveFeed", () => {
   });
 
   it("keeps notifying other subscribers when one throws", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     const received: string[] = [];
     feed.subscribe(() => {
       throw new Error("broken client");
@@ -116,7 +116,7 @@ describe("LiveFeed", () => {
   });
 
   it("maps socket status messages to source statuses and only notifies on change", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     const statuses: unknown[] = [];
     feed.subscribe((event) => {
       if (event.type === "status") statuses.push(event.sources.solanaLogs);
@@ -132,7 +132,7 @@ describe("LiveFeed", () => {
   });
 
   it("forgets tokens older than the retention window", () => {
-    const feed = new LiveFeed();
+    const feed = new LiveFeed(1);
     feed.tokenDetected(token("old", new Date("2026-11-13T18:00:00.000Z")));
     feed.tokenDetected(token("new", new Date("2026-11-13T20:00:00.000Z")));
 
@@ -155,7 +155,7 @@ describe("LiveFeed", () => {
     });
 
     it("delivers each trade only to subscribers of its token, flagging the creator's trades", () => {
-      const feed = new LiveFeed();
+      const feed = new LiveFeed(1);
       feed.tokenDetected(token("a"));
       const forA: LiveTrade[] = [];
       const forB: LiveTrade[] = [];
@@ -173,7 +173,7 @@ describe("LiveFeed", () => {
     });
 
     it("does not flag trades of tokens it has never seen as dev trades", () => {
-      const feed = new LiveFeed();
+      const feed = new LiveFeed(1);
       const received: LiveTrade[] = [];
       feed.subscribeTrades("ghost", (live) => received.push(live));
 
@@ -183,7 +183,7 @@ describe("LiveFeed", () => {
     });
 
     it("keeps notifying other trade subscribers when one throws", () => {
-      const feed = new LiveFeed();
+      const feed = new LiveFeed(1);
       const received: string[] = [];
       feed.subscribeTrades("a", () => {
         throw new Error("broken client");
@@ -196,7 +196,7 @@ describe("LiveFeed", () => {
     });
 
     it("stops delivering after unsubscribe and leaves no subscription behind", () => {
-      const feed = new LiveFeed();
+      const feed = new LiveFeed(1);
       const received: string[] = [];
       const first = feed.subscribeTrades("a", (live) => received.push(live.trade.signature));
       const second = feed.subscribeTrades("a", () => {});
@@ -211,7 +211,7 @@ describe("LiveFeed", () => {
     });
 
     it("does not send trades to general event subscribers", () => {
-      const feed = new LiveFeed();
+      const feed = new LiveFeed(1);
       const events: LiveEvent[] = [];
       feed.subscribe((event) => events.push(event));
 

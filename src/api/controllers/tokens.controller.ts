@@ -1,5 +1,6 @@
 import { Controller, Get, Inject, Param, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
+import { APP_CONFIG, type AppConfig } from "../../config/app-config.js";
 import type { HistoryReader } from "../../history/domain/history-reader.js";
 import type { TokenCatalogReader } from "../../history/domain/token-catalog-reader.js";
 import { HISTORY_READER, TOKEN_CATALOG_READER } from "../../history/history.module.js";
@@ -36,11 +37,12 @@ export class TokensController {
     @Inject(LiveStreams) private readonly streams: LiveStreams,
     @Inject(WALLET_REPUTATION_QUERIES) private readonly reputation: WalletReputationQueries,
     @Inject(TokenVisibility) private readonly visibility: TokenVisibility,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   @Get("tokens")
   async list(@SearchParams() params: URLSearchParams) {
-    const query = parseTokenListQuery(params, new Date());
+    const query = parseTokenListQuery(params, new Date(), this.config.api.publicMinSmartWallets);
     const { tokens, total } = await this.catalog.listTokens(query);
     return { tokens: tokens.map(tokenListItemView), page: query.page, pageSize: query.pageSize, total };
   }

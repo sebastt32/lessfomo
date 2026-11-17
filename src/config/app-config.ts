@@ -10,6 +10,8 @@ export interface AppConfig {
     readonly corsOrigins: readonly string[];
     /** Interval between `: ping` comments on open SSE streams. */
     readonly heartbeatMs: number;
+    /** Good-or-elite wallets a token needs to be public (docs/API.md "Public visibility rule"). */
+    readonly publicMinSmartWallets: number;
   };
   readonly history: {
     /** PostgreSQL when set, otherwise SQLite at `sqlitePath`. */
@@ -60,6 +62,14 @@ const readNumber = (env: Environment, name: string, fallback: number): number =>
   return Number.isFinite(value) && value > 0 ? value : fallback;
 };
 
+/** A plain positive integer (`"5"`, not `"5.0"`, `"1e3"` or `"0"`), otherwise `fallback`. */
+const readPositiveInteger = (env: Environment, name: string, fallback: number): number => {
+  const raw = env[name];
+  if (raw === undefined || !/^\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+};
+
 export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => ({
   startedAt,
   api: {
@@ -70,6 +80,7 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0),
     heartbeatMs: 15_000,
+    publicMinSmartWallets: readPositiveInteger(env, "PUBLIC_MIN_SMART_WALLETS", 5),
   },
   history: {
     databaseUrl: env["DATABASE_URL"] || undefined,

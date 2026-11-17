@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api-error.js";
-import { parseTokenListQuery } from "./token-list-query.js";
+import { parseMinSmartWallets, parseTokenListQuery } from "./token-list-query.js";
 
 const NOW = new Date("2026-11-14T12:00:00.000Z");
-const parse = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW);
+const parse = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW, 1);
 const rejection = (query: string): { status: number; code: string; message: string } => {
   try {
     parse(query);
@@ -107,5 +107,17 @@ describe("parseTokenListQuery", () => {
       'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
     );
     expect(rejection("minSmartWallets=1.5").message).toBe('Invalid query parameter "minSmartWallets": expected an integer');
+  });
+
+  it("uses the configured public minimum as the default and the floor of minSmartWallets", () => {
+    const withMinimum = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW, 5).minSmartWallets;
+    expect(withMinimum("")).toBe(5);
+    expect(withMinimum("minSmartWallets=2")).toBe(5);
+    expect(withMinimum("minSmartWallets=0")).toBe(5);
+    expect(withMinimum("minSmartWallets=7")).toBe(7);
+    expect(parseMinSmartWallets(null, 5)).toBe(5);
+    expect(parseMinSmartWallets("2", 5)).toBe(5);
+    expect(parseMinSmartWallets("6", 5)).toBe(6);
+    expect(() => parseMinSmartWallets("1.5", 5)).toThrow('Invalid query parameter "minSmartWallets": expected an integer');
   });
 });

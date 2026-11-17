@@ -71,11 +71,14 @@ interface TokenState {
   lastScreening: { readonly result: ScreeningResult; readonly evaluatedAt: Date } | null;
 }
 
-/** A token is public once at least one good-or-elite wallet bought it (docs/API.md "Public visibility rule"). */
-const isPublicSummary = (summary: SmartWalletsSummary): boolean => summary.count >= 1;
-
 /** Use case: in-memory view of what is happening right now, plus an event bus for live clients. */
 export class LiveFeed {
+  /**
+   * @param publicMinSmartWallets good-or-elite wallets a token needs before public listeners hear
+   * about it (`PUBLIC_MIN_SMART_WALLETS`, docs/API.md "Public visibility rule").
+   */
+  constructor(private readonly publicMinSmartWallets: number) {}
+
   private readonly tokens = new Map<string, TokenState>();
   private readonly listeners = new Set<LiveListener>();
   private readonly publicListeners = new Set<LiveListener>();
@@ -122,13 +125,15 @@ export class LiveFeed {
       .sort((a, b) => b.snapshot.momentum.score - a.snapshot.momentum.score);
     this.moversAt = at;
     this.emit({ type: "momentum", at, movers: this.movers });
-    this.emitPublic({ type: "momentum", at, movers: this.movers.filter((mover) => isPublicSummary(mover.smartWallets)) });
+    const publicMovers = this.movers.filter((mover) => this.isPublicSummary(mover.smartWallets));
+    this.emitPublic({ type: "momentum", at, movers: publicMovers });
   }
 
   /** Keeps a token's smart-wallet counts (for movers) and publishes the change. */
   smartWalletChanged(change: SmartWalletChange): void {
     const state = this.tokens.get(change.mint);
-    const becamePublic = state !== undefined && !isPublicSummary(state.smartWallets) && isPublicSummary(change.smartWallets);
+    const becamePublic =
+      state !== undefined && !this.isPublicSummary(state.smartWallets) && this.isPublicSummary(change.smartWallets);
     if (state !== undefined) state.smartWallets = change.smartWallets;
     const event: LiveEvent = { type: "smart-wallet", mint: change.mint, smartWallets: change.smartWallets, wallet: change.wallet };
     this.emit(event);
@@ -139,7 +144,7 @@ export class LiveFeed {
         this.emitPublic({ type: "screening", ...state.lastScreening, smartWallets: change.smartWallets });
       }
     }
-    if (isPublicSummary(change.smartWallets)) this.emitPublic(event);
+    if (this.isPublicSummary(change.smartWallets)) this.emitPublic(event);
   }
 
   sourceStatusChanged(source: SourceName, status: SourceStatus): void {
@@ -209,14 +214,19 @@ export class LiveFeed {
     return this.tokens.get(mint)?.smartWallets ?? NO_SMART_WALLETS;
   }
 
-  /** The token has at least one live good-or-elite wallet. */
+  /** The token has at least `publicMinSmartWallets` live good-or-elite wallets. */
   isPublic(mint: string): boolean {
-    return isPublicSummary(this.smartWalletsOf(mint));
+    return this.isPublicSummary(this.smartWalletsOf(mint));
+  }
+
+  private isPublicSummary(summary: SmartWalletsSummary): boolean {
+    return summary.count >= this.publicMinSmartWallets;
   }
 
   /**
    * Events of public tokens only: a token appears (`token`, then its latest `screening`) when its
-   * first good-or-elite wallet buys; `momentum` lists only public movers; `status` is unchanged.
+   * smart-wallet count reaches `publicMinSmartWallets`; `momentum` lists only public movers;
+   * `status` is unchanged.
    */
   subscribePublic(listener: LiveListener): () => void {
     this.publicListeners.add(listener);

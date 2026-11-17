@@ -46,6 +46,7 @@ All variables are optional.
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
+| `PUBLIC_MIN_SMART_WALLETS` | `5` | Good-or-elite wallets a token needs to be shown by the public API (positive integer; invalid values use `5`) |
 
 ## Safety checks
 
@@ -163,12 +164,13 @@ good or elite wallet's first buy (never the creator's) is counted in the token's
 Changes are stored per token and pushed as `smart-wallet` events on `/api/stream`. When the token
 closes, its smart wallets are recomputed with the exact point-in-time tiers.
 
-**Public visibility.** The public API only exposes tokens bought by at least one good-or-elite
-wallet (tier at entry). Lists (`/api/tokens`, `/api/screenings`, `/api/movers`) leave the others
-out (`minSmartWallets` defaults to 1, lower values count as 1); their detail, candles, snapshots
+**Public visibility.** The public API only exposes tokens bought by at least
+`PUBLIC_MIN_SMART_WALLETS` (default 5) good-or-elite wallets (tier at entry). Lists (`/api/tokens`,
+`/api/screenings`, `/api/movers`) leave the others out (`minSmartWallets` defaults to that minimum,
+lower values count as it); their detail, candles, snapshots
 and smart wallets answer `404 TOKEN_NOT_FOUND` as if they did not exist; `/api/stream` skips their
-events and announces a token (`token`, then its latest `screening`) the moment its first good
-wallet buys; `/api/tokens/:mint/stream` sends nothing until then. `/api/wallets/:address` lists only
+events and announces a token (`token`, then its latest `screening`) the moment it reaches that
+many smart wallets; `/api/tokens/:mint/stream` sends nothing until then. `/api/wallets/:address` lists only
 results in public tokens, although the record rates all of them. `/api/stats` and
 `/api/analysis/smart-wallets` stay aggregates over every stored token, and every internal process
 (reputation, snapshots, analysis) keeps using all the data; nothing is deleted.

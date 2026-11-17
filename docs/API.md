@@ -297,13 +297,13 @@ Invalid values → `400 INVALID_QUERY` with a message naming the parameter.
 
 ### Public visibility rule
 
-The public API only exposes tokens that have **at least one good-or-elite wallet** (point-in-time
-tier at entry). Every token-level endpoint and event applies it: `/api/movers`, `/api/screenings`,
+The public API only exposes tokens that have **at least `PUBLIC_MIN_SMART_WALLETS` (default 5)
+good-or-elite wallets** (point-in-time tier at entry). Every token-level endpoint and event applies it: `/api/movers`, `/api/screenings`,
 `/api/tokens` (list), `/api/tokens/:mint`, `/candles`, `/snapshots`, `/smart-wallets`,
 `/api/tokens/:mint/stream`, and the `token`, `screening`, `momentum` and `smart-wallet` events on
 `/api/stream`. A token that does not qualify answers `404 TOKEN_NOT_FOUND` exactly as if it did not
 exist, and is never included in lists or events. A token becomes visible as soon as it qualifies
-(e.g. a good wallet buys it in minute 3); its per-token stream sends nothing until then.
+(e.g. its 5th good wallet buys it in minute 3); its per-token stream sends nothing until then.
 `/api/wallets/:address` only lists results of qualifying tokens. `/api/stats` and
 `/api/analysis/smart-wallets` remain aggregate-only and are computed over all stored data; they
 never reveal individual non-qualifying tokens. Internal processes (reputation, snapshots, analysis)
@@ -311,8 +311,9 @@ keep using every stored token.
 
 ### Smart-wallet filters
 
-`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (an integer, default `1`; integers
-below 1 are treated as 1 because of the visibility rule; non-integers → `400 INVALID_QUERY`) and
+`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (an integer, default
+`PUBLIC_MIN_SMART_WALLETS` (5); integers below it are treated as it because of the visibility rule;
+non-integers → `400 INVALID_QUERY`) and
 `/api/tokens` also accepts `sort=smartWallets:desc`. `GET /api/screenings` accepts `minSmartWallets`
 too. Invalid values → `400 INVALID_QUERY`. Live SSE events are unchanged; clients filter `momentum`
 movers by `smartWallets.count`, and a new SSE event on `/api/stream` reports changes:

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenVisibility } from "../../api/token-visibility.js";
+import { loadAppConfig } from "../../config/app-config.js";
 import { SqliteHistoryRecorder } from "../../history/infrastructure/sqlite/sqlite-history-recorder.js";
 import { LiveFeed } from "../../live-feed/application/live-feed.js";
 import type { Trade } from "../../momentum/domain/trade.js";
@@ -127,7 +128,7 @@ describe("closed results use only trades before the close (no look-ahead)", () =
 
 /** The production wiring of the tracker and the closer, on one store. */
 const wire = (store: SqliteHistoryRecorder, rules: ReputationRules, window: number, clock: () => Date, closeGraceMs = 30_000) => {
-  const feed = new LiveFeed();
+  const feed = new LiveFeed(1);
   const live = new Map<string, Map<string, WalletTier>>();
   const tracker = new SmartWalletTracker({
     trackingWindowMs: window,
@@ -190,7 +191,7 @@ describe("live smart wallets use point-in-time tiers only", () => {
     const buy = tr("A", "W", "buy", clock + MIN, 1, 1000);
     await store.recordTrade(buy);
     tracker.tradeRecorded(buy);
-    const visibility = new TokenVisibility(feed, store);
+    const visibility = new TokenVisibility(feed, store, loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, new Date()));
     expect(await visibility.isPublic("A")).toBe(false);
 
     // Once every result closed before the buy is stored, the buy is rated: none at that moment.

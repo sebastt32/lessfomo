@@ -87,8 +87,8 @@ const start = async () => {
   }
   await new ReputationCloser({ store: history, rules: DEFAULT_REPUTATION_RULES, trackingWindowMs: HOUR, batchSize: 100 }).tick();
 
-  const feed = new LiveFeed();
-  const config = loadAppConfig({}, new Date(now));
+  const feed = new LiveFeed(1);
+  const config = loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, new Date(now));
   const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] })
     .overrideProvider(LIVE_FEED)
     .useValue(feed)

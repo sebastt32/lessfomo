@@ -280,13 +280,13 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
 let app: INestApplication | null = null;
 
 const configWith = (overrides: { heartbeatMs?: number }): AppConfig => {
-  const config = loadAppConfig({}, STARTED_AT);
+  const config = loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, STARTED_AT);
   return { ...config, api: { ...config.api, ...overrides } };
 };
 
 /** The Nest API on a free port, with a real LiveFeed and fake history and SOL/USD price. */
 const start = async (options: { heartbeatMs?: number } = {}) => {
-  const feed = new LiveFeed();
+  const feed = new LiveFeed(1);
   const history = new FakeHistory();
   const solPrice = new FakeSolPrice();
   const reported: unknown[] = [];
