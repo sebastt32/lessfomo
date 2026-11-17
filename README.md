@@ -247,7 +247,8 @@ Columns added later (`token_closures.version`, `wallet_token_results.first_sell_
 `token_smart_wallets.style_at_entry`, `smart_wallet_tokens.conviction`, `wallet_reputation.style`,
 `flip_rate`, `median_hold_seconds`) are added on startup to these derived tables only; raw tables
 are never altered.
-`users` and `sessions` are created on startup in older databases too; no existing table changes.
+`users` and `sessions` are created on startup in older databases too, and both get a
+`credential_version` column added on startup (existing sessions stay valid); no other table changes.
 `token_state` and `token_snapshots` are created on startup in older databases too; the state
 of tokens stored before them is rebuilt from their screenings, momentum and trades.
 
@@ -324,9 +325,10 @@ code 1 and changes nothing unless `--reset` is given. No credentials live in the
 | --- | --- |
 | Passwords | `scrypt` (N=2^15, r=8, p=3) with a random salt per user, compared in constant time. An unknown username costs the same work as a wrong password. New passwords need 12+ characters |
 | Sessions | A random 32-byte token in the `lessfomo_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`); the database keeps only its SHA-256. Valid for `AUTH_SESSION_DAYS` after the last request (refreshed at most once a minute). Expired sessions are deleted hourly |
-| Sign-in limit | 5 failed attempts per username and client IP in 15 minutes, then `429` until the window ends. Kept in memory, so a restart forgets it. Wrong current passwords when changing the password count too |
+| Sign-in limit | 5 failed attempts per username and client IP in 15 minutes, and 30 per client IP across usernames, then `429` until the window ends. Kept in memory, so a restart forgets it. Wrong current passwords when changing the password count too. At most 10,000 usernames and client IPs are counted at once and none is forgotten inside its window: when full, new ones get `429` until the oldest window ends |
+| Busy server | At most 4 sign-in passwords are verified at once and 32 wait; beyond that the answer is `503 SERVER_BUSY` with `Retry-After: 2`, without hashing and without counting a failed attempt. Password changes (signed-in users only) have their own bound, 2 at once and 8 waiting, so a flood of sign-ins cannot block them |
 | Cross-site requests | The auth `POST`s need `Content-Type: application/json` and, when the browser sends `Origin`, an allowed CORS origin or the API's own host, otherwise `403 FORBIDDEN_ORIGIN` |
-| Ending a session | Signing out, changing the password (every other session of the user) and `--reset` (all of them) delete sessions; their open streams are closed, at the latest on the next heartbeat |
+| Ending a session | Signing out, changing the password (every other session of the user) and `--reset` (all of them) delete sessions; their open streams are closed, at the latest on the next heartbeat. A password change or reset replaces the hash and ends those sessions in one transaction, and every session carries the `credential_version` of the password it was opened with, so a sign-in that was checking the old password meanwhile gets `401` and no session |
 | Failures | If a session cannot be checked the answer is `401`, never access |
 
 ### Security notes

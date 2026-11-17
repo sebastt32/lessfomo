@@ -1479,6 +1479,124 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
       expect(await countOf("trades")).toBe(1);
       expect(await countOf("screenings")).toBe(1);
     });
+
+    it("opens a session only for the password hash that was verified", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "SuperAdmin"));
+
+      expect(await history.createVerifiedSession(session("hash-a", "u1"), "scrypt$hash-of-u1")).toBe(true);
+      expect(await history.createVerifiedSession(session("hash-b", "u1"), "scrypt$another")).toBe(false);
+      expect(await history.createVerifiedSession(session("hash-c", "nobody"), "scrypt$hash-of-u1")).toBe(false);
+
+      expect(await history.findSession("hash-a")).toEqual({
+        ...session("hash-a", "u1"),
+        user: { id: "u1", username: "SuperAdmin", role: "superadmin" },
+      });
+      expect(await history.findSession("hash-b")).toBeNull();
+      expect(await history.findSession("hash-c")).toBeNull();
+      expect(await countOf("sessions")).toBe(1);
+      await expect(history.createVerifiedSession(session("hash-a", "u1"), "scrypt$hash-of-u1")).rejects.toThrow();
+    });
+
+    it("replaces a password and ends the user's other sessions at once; the old hash opens no session afterwards", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createUser(newUser("u2", "other"));
+      for (const hash of ["a", "b", "c"]) await history.createVerifiedSession(session(hash, "u1"), "scrypt$hash-of-u1");
+      await history.createVerifiedSession(session("x", "u2"), "scrypt$hash-of-u2");
+
+      const revoked = await history.replacePassword({
+        userId: "u1",
+        passwordHash: "scrypt$new",
+        updatedAt: LATER,
+        expectedPasswordHash: "scrypt$hash-of-u1",
+        keepTokenHash: "b",
+      });
+
+      expect(revoked?.sort()).toEqual(["a", "c"]);
+      expect(await history.findUserById("u1")).toMatchObject({ passwordHash: "scrypt$new", createdAt: AT, updatedAt: LATER });
+      expect(await history.findUserById("u2")).toMatchObject({ passwordHash: "scrypt$hash-of-u2", updatedAt: AT });
+      expect(await history.findSession("a")).toBeNull();
+      expect(await history.findSession("b")).not.toBeNull();
+      expect(await history.findSession("c")).toBeNull();
+      expect(await history.findSession("x")).not.toBeNull();
+      expect(await history.createVerifiedSession(session("late", "u1"), "scrypt$hash-of-u1")).toBe(false);
+      expect(await history.findSession("late")).toBeNull();
+      expect(await history.createVerifiedSession(session("fresh", "u1"), "scrypt$new")).toBe(true);
+      expect(await history.findSession("fresh")).not.toBeNull();
+      expect(await countOf("sessions")).toBe(3);
+    });
+
+    it("refuses to replace a password that is no longer the expected one, changing nothing", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createVerifiedSession(session("a", "u1"), "scrypt$hash-of-u1");
+      await history.createVerifiedSession(session("b", "u1"), "scrypt$hash-of-u1");
+      const change = { userId: "u1", passwordHash: "scrypt$new", updatedAt: LATER, keepTokenHash: "a" };
+
+      expect(await history.replacePassword({ ...change, expectedPasswordHash: "scrypt$stale" })).toBeNull();
+      expect(await history.replacePassword({ ...change, userId: "nobody", expectedPasswordHash: null })).toBeNull();
+
+      expect(await history.findUserById("u1")).toMatchObject({ passwordHash: "scrypt$hash-of-u1", updatedAt: AT });
+      expect(await history.findSession("a")).not.toBeNull();
+      expect(await history.findSession("b")).not.toBeNull();
+
+      // Without an expected hash (create-superadmin --reset) it always applies, and keeps no session.
+      expect((await history.replacePassword({ ...change, expectedPasswordHash: null, keepTokenHash: null }))?.sort()).toEqual(["a", "b"]);
+      expect(await history.findUserById("u1")).toMatchObject({ passwordHash: "scrypt$new", updatedAt: LATER });
+      expect(await countOf("sessions")).toBe(0);
+    });
+
+    it("never finds a session opened with earlier credentials, even one that was not deleted", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createUser(newUser("u2", "other"));
+      await history.createSession(session("a", "u1"));
+      await history.createSession(session("x", "u2"));
+
+      await history.setPasswordHash("u1", "scrypt$second", LATER);
+
+      expect(await countOf("sessions")).toBe(2);
+      expect(await history.findSession("a")).toBeNull();
+      expect(await history.findSession("x")).not.toBeNull();
+
+      // Keeping it through the next password change does not bring it back.
+      const revoked = await history.replacePassword({
+        userId: "u1",
+        passwordHash: "scrypt$third",
+        updatedAt: LATER,
+        expectedPasswordHash: "scrypt$second",
+        keepTokenHash: "a",
+      });
+      expect(revoked).toEqual([]);
+      expect(await history.findSession("a")).toBeNull();
+    });
+
+    it("adds credential versions to a database created before them, keeping its users and sessions", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createSession(session("hash-a", "u1"));
+      await execOnLast("ALTER TABLE sessions DROP COLUMN credential_version; ALTER TABLE users DROP COLUMN credential_version");
+
+      const migrated = await reopenLast();
+
+      expect(await migrated.findUserByUsername("superadmin")).toMatchObject({ id: "u1", passwordHash: "scrypt$hash-of-u1" });
+      expect(await migrated.findSession("hash-a")).not.toBeNull();
+      expect(await migrated.createVerifiedSession(session("hash-b", "u1"), "scrypt$hash-of-u1")).toBe(true);
+      const revoked = await migrated.replacePassword({
+        userId: "u1",
+        passwordHash: "scrypt$new",
+        updatedAt: LATER,
+        expectedPasswordHash: "scrypt$hash-of-u1",
+        keepTokenHash: "hash-b",
+      });
+      expect(revoked).toEqual(["hash-a"]);
+
+      const again = await reopenLast();
+      expect(await again.findSession("hash-a")).toBeNull();
+      expect(await again.findSession("hash-b")).not.toBeNull();
+      expect(await again.createVerifiedSession(session("hash-c", "u1"), "scrypt$hash-of-u1")).toBe(false);
+    });
   });
 });
 

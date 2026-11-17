@@ -101,15 +101,19 @@ import {
 } from "../wallet-reputation-sql.js";
 import type { SessionStore } from "../../../auth/domain/session-store.js";
 import type { Session, SessionWithUser, User } from "../../../auth/domain/user.js";
-import type { NewUser, UserStore } from "../../../auth/domain/user-store.js";
+import type { NewUser, PasswordChange, UserStore } from "../../../auth/domain/user-store.js";
 import {
+  AUTH_ADDED_COLUMNS,
   authDdl,
   createSessionStatement,
+  createVerifiedSessionStatement,
   createUserStatement,
   deleteExpiredSessionsStatement,
   deleteSessionStatement,
   deleteUserSessionsStatement,
   sessionStatement,
+  keepSessionStatement,
+  replacePasswordStatement,
   setPasswordHashStatement,
   toSessionWithUser,
   toUser,
@@ -280,7 +284,10 @@ export class PostgresHistory
         await client.query("BEGIN");
         await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_ID]);
         await client.query(SCHEMA);
-        for (const { table, column, definition } of walletReputationAddedColumns({ real: "DOUBLE PRECISION", time: "BIGINT" })) {
+        for (const { table, column, definition } of [
+          ...walletReputationAddedColumns({ real: "DOUBLE PRECISION", time: "BIGINT" }),
+          ...AUTH_ADDED_COLUMNS,
+        ]) {
           await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
         }
         await client.query(WALLET_REPUTATION_ADDED_INDEXES);
@@ -521,8 +528,33 @@ export class PostgresHistory
     await this.rows(setPasswordHashStatement(CHART_DIALECT, userId, passwordHash, updatedAt));
   }
 
+  async replacePassword(change: PasswordChange): Promise<string[] | null> {
+    const client = await this.pool.connect();
+    const run = async (statement: Statement): Promise<Row[]> => (await client.query(statement.sql, statement.params)).rows as Row[];
+    try {
+      await client.query("BEGIN");
+      let revoked: string[] | null = null;
+      if ((await run(replacePasswordStatement(CHART_DIALECT, change))).length > 0) {
+        if (change.keepTokenHash !== null) await run(keepSessionStatement(CHART_DIALECT, change.userId, change.keepTokenHash));
+        const deleted = await run(deleteUserSessionsStatement(CHART_DIALECT, change.userId, change.keepTokenHash));
+        revoked = deleted.map((row) => String(row["token_hash"]));
+      }
+      await client.query("COMMIT");
+      return revoked;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async createSession(session: Session): Promise<void> {
     await this.rows(createSessionStatement(CHART_DIALECT, session));
+  }
+
+  async createVerifiedSession(session: Session, verifiedPasswordHash: string): Promise<boolean> {
+    return (await this.rows(createVerifiedSessionStatement(CATALOG_DIALECT, session, verifiedPasswordHash))).length > 0;
   }
 
   async findSession(tokenHash: string): Promise<SessionWithUser | null> {

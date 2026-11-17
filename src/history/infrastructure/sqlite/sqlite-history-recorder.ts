@@ -102,15 +102,19 @@ import {
 } from "../wallet-reputation-sql.js";
 import type { SessionStore } from "../../../auth/domain/session-store.js";
 import type { Session, SessionWithUser, User } from "../../../auth/domain/user.js";
-import type { NewUser, UserStore } from "../../../auth/domain/user-store.js";
+import type { NewUser, PasswordChange, UserStore } from "../../../auth/domain/user-store.js";
 import {
+  AUTH_ADDED_COLUMNS,
   authDdl,
   createSessionStatement,
+  createVerifiedSessionStatement,
   createUserStatement,
   deleteExpiredSessionsStatement,
   deleteSessionStatement,
   deleteUserSessionsStatement,
   sessionStatement,
+  keepSessionStatement,
+  replacePasswordStatement,
   setPasswordHashStatement,
   toSessionWithUser,
   toUser,
@@ -456,8 +460,20 @@ export class SqliteHistoryRecorder
     this.run(setPasswordHashStatement(CHART_DIALECT, userId, passwordHash, updatedAt));
   }
 
+  async replacePassword(change: PasswordChange): Promise<string[] | null> {
+    return this.transaction(() => {
+      if (this.rows(replacePasswordStatement(CHART_DIALECT, change)).length === 0) return null;
+      if (change.keepTokenHash !== null) this.run(keepSessionStatement(CHART_DIALECT, change.userId, change.keepTokenHash));
+      return this.rows(deleteUserSessionsStatement(CHART_DIALECT, change.userId, change.keepTokenHash)).map((row) => String(row["token_hash"]));
+    });
+  }
+
   async createSession(session: Session): Promise<void> {
     this.run(createSessionStatement(CHART_DIALECT, session));
+  }
+
+  async createVerifiedSession(session: Session, verifiedPasswordHash: string): Promise<boolean> {
+    return this.rows(createVerifiedSessionStatement(CATALOG_DIALECT, session, verifiedPasswordHash)).length > 0;
   }
 
   async findSession(tokenHash: string): Promise<SessionWithUser | null> {
@@ -481,9 +497,9 @@ export class SqliteHistoryRecorder
     return this.rows(deleteExpiredSessionsStatement(CHART_DIALECT, now, limit)).length;
   }
 
-  /** Adds the columns of later versions to existing derived tables, once (SQLite has no ADD COLUMN IF NOT EXISTS). */
+  /** Adds the columns of later versions to existing derived tables and to users and sessions, once (SQLite has no ADD COLUMN IF NOT EXISTS). */
   private addColumns(): void {
-    for (const { table, column, definition } of walletReputationAddedColumns({ real: "REAL", time: "INTEGER" })) {
+    for (const { table, column, definition } of [...walletReputationAddedColumns({ real: "REAL", time: "INTEGER" }), ...AUTH_ADDED_COLUMNS]) {
       const exists = this.query(`SELECT 1 AS found FROM pragma_table_info(?) WHERE name = ?`, table, column).length > 0;
       if (!exists) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
@@ -507,11 +523,12 @@ export class SqliteHistoryRecorder
     this.db.prepare(statement.sql).run(...statement.params);
   }
 
-  private transaction(work: () => void): void {
+  private transaction<T>(work: () => T): T {
     this.db.exec("BEGIN");
     try {
-      work();
+      const result = work();
       this.db.exec("COMMIT");
+      return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

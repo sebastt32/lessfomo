@@ -55,7 +55,7 @@ describe("LoginThrottle", () => {
     expect(throttle.attempt("other", "1.1.1.1")).toEqual({ allowed: true });
   });
 
-  it("keeps bounded memory: expired entries go first, then the oldest", () => {
+  it("keeps bounded memory: expired entries make room, live ones are never dropped", () => {
     const { throttle, advance } = setup({ maxFailures: 5, windowMs: 15 * MINUTE, maxEntries: 3 });
     throttle.attempt("a", "ip");
     advance(16 * MINUTE);
@@ -69,5 +69,63 @@ describe("LoginThrottle", () => {
     expect(throttle.size()).toBe(3);
     for (let i = 0; i < 1000; i += 1) throttle.attempt(`user${i}`, "ip");
     expect(throttle.size()).toBe(3);
+  });
+
+  it("keeps a locked username locked while made-up usernames fill the memory", () => {
+    const { throttle } = setup({ maxFailures: 5, windowMs: 15 * MINUTE, maxEntries: 50, maxFailuresPerIp: 1000 });
+    for (let i = 0; i < 5; i += 1) expect(throttle.attempt("admin", "1.1.1.1")).toEqual({ allowed: true });
+    expect(throttle.attempt("admin", "1.1.1.1")).toMatchObject({ allowed: false });
+
+    for (let i = 0; i < 500; i += 1) throttle.attempt(`junk${i}`, `10.0.${i % 250}.${i % 7}`);
+
+    expect(throttle.size()).toBe(50);
+    expect(throttle.attempt("admin", "1.1.1.1")).toMatchObject({ allowed: false });
+  });
+
+  it("fails closed for new usernames while full of live entries, until one expires", () => {
+    const { throttle, advance } = setup({ maxFailures: 5, windowMs: 15 * MINUTE, maxEntries: 3, maxFailuresPerIp: 1000 });
+    throttle.attempt("a", "1.1.1.1");
+    advance(MINUTE);
+    throttle.attempt("b", "2.2.2.2");
+    throttle.attempt("c", "3.3.3.3");
+
+    // Refused until the oldest entry (a, 1 minute old) leaves its window.
+    expect(throttle.attempt("d", "4.4.4.4")).toEqual({ allowed: false, retryAfterSeconds: 14 * 60 });
+    expect(throttle.size()).toBe(3);
+    // Usernames already remembered keep their own count.
+    expect(throttle.attempt("b", "2.2.2.2")).toEqual({ allowed: true });
+
+    advance(14 * MINUTE);
+    expect(throttle.attempt("d", "4.4.4.4")).toEqual({ allowed: true });
+    expect(throttle.size()).toBe(3);
+  });
+
+  it("blocks a client IP after 30 failures across usernames, and a success does not reset it", () => {
+    const { throttle, advance } = setup();
+    for (let i = 0; i < 30; i += 1) expect(throttle.attempt(`user${i}`, "1.1.1.1")).toEqual({ allowed: true });
+    advance(5 * MINUTE);
+
+    expect(throttle.attempt("admin", "1.1.1.1")).toEqual({ allowed: false, retryAfterSeconds: 600 });
+    expect(throttle.attempt("admin", "2.2.2.2")).toEqual({ allowed: true });
+
+    // One right password gives back that one attempt only.
+    throttle.succeeded("user0", "1.1.1.1");
+    expect(throttle.attempt("admin", "1.1.1.1")).toEqual({ allowed: true });
+    expect(throttle.attempt("admin", "1.1.1.1")).toMatchObject({ allowed: false });
+
+    advance(10 * MINUTE);
+    expect(throttle.attempt("other", "1.1.1.1")).toEqual({ allowed: true });
+  });
+
+  it("does not count an attempt that was forgiven because its password was never checked", () => {
+    const { throttle } = setup();
+    for (let i = 0; i < 40; i += 1) {
+      expect(throttle.attempt("admin", "1.1.1.1")).toEqual({ allowed: true });
+      throttle.forgive("admin", "1.1.1.1");
+    }
+    expect(throttle.size()).toBe(0);
+
+    for (let i = 0; i < 5; i += 1) expect(throttle.attempt("admin", "1.1.1.1")).toEqual({ allowed: true });
+    expect(throttle.attempt("admin", "1.1.1.1")).toMatchObject({ allowed: false });
   });
 });

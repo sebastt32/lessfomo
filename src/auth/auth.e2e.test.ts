@@ -437,6 +437,49 @@ describe("authentication (Nest e2e)", () => {
       for (let i = 0; i < 5; i += 1) expect((await login("wrong-password-123")).status).toBe(401);
       expect((await login()).status).toBe(429);
     });
+
+    it("answers 429 TOO_MANY_ATTEMPTS after 30 failures of a client IP across usernames, whatever the username", async () => {
+      const { login } = await start();
+      const from = (ip: string) => ({ "x-forwarded-for": ip });
+
+      // Four at a time: no more than the password verifications that run at once.
+      for (let batch = 0; batch < 30; batch += 5) {
+        const answers = await Promise.all(
+          [0, 1, 2, 3, 4].map((offset) => login("wrong-password-123", from("203.0.113.7"), `nobody${batch + offset}`)),
+        );
+        expect(answers.map((answer) => answer.status)).toEqual([401, 401, 401, 401, 401]);
+      }
+      const blocked = await login(PASSWORD, from("203.0.113.7"));
+
+      expect(blocked.status).toBe(429);
+      expect((await blocked.json()).error.code).toBe("TOO_MANY_ATTEMPTS");
+      expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+      expect(blocked.headers.getSetCookie()).toEqual([]);
+      expect((await login(PASSWORD, from("198.51.100.1"))).status).toBe(200);
+    }, 30_000);
+
+    it("answers 503 SERVER_BUSY with Retry-After: 2 instead of queueing password checks without bound", async () => {
+      const { login, post, signIn } = await start();
+      const cookie = await signIn();
+
+      // Unknown usernames cost a full scrypt verification each: 4 run, 32 wait, the rest are refused at once.
+      const flood = await Promise.all(
+        Array.from({ length: 80 }, (_, i) => login("wrong-password-123", { "x-forwarded-for": `10.9.${i}.1` }, `nobody${i}`)),
+      );
+
+      const busy = flood.filter((answer) => answer.status === 503);
+      expect(flood.filter((answer) => answer.status !== 503 && answer.status !== 401)).toEqual([]);
+      expect(flood.filter((answer) => answer.status === 401).length).toBeLessThanOrEqual(36);
+      expect(busy.length).toBeGreaterThanOrEqual(44);
+      for (const answer of busy) {
+        expect(answer.headers.get("retry-after")).toBe("2");
+        expect(answer.headers.getSetCookie()).toEqual([]);
+        expect((await answer.json()).error.code).toBe("SERVER_BUSY");
+      }
+      // Served again once the queue drained; the busy answers did not lock anybody out.
+      expect((await login()).status).toBe(200);
+      expect((await post("/api/auth/password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD }, { cookie })).status).toBe(204);
+    }, 30_000);
   });
 
   describe("CSRF defence and CORS", () => {

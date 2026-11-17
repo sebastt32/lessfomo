@@ -39,10 +39,25 @@ interface SessionUser { username: string; role: "superadmin"; }
 
 | Endpoint | Body | Success | Errors |
 | --- | --- | --- | --- |
-| `POST /api/auth/login` | `{ "username": string, "password": string }` | `200 { "user": SessionUser }` + session cookie | `400 INVALID_BODY`, `401 INVALID_CREDENTIALS` (same answer for unknown user and wrong password), `429 TOO_MANY_ATTEMPTS` with `Retry-After` seconds (5 failures per username and client IP in 15 minutes) |
+| `POST /api/auth/login` | `{ "username": string, "password": string }` | `200 { "user": SessionUser }` + session cookie | `400 INVALID_BODY`, `401 INVALID_CREDENTIALS` (same answer for unknown user and wrong password), `429 TOO_MANY_ATTEMPTS` with `Retry-After` seconds (see "Sign-in limits"), `503 SERVER_BUSY` with `Retry-After: 2` |
 | `GET /api/auth/me` | — | `200 { "user": SessionUser }` | `401 UNAUTHENTICATED` |
 | `POST /api/auth/logout` | — | `204`, cookie cleared, session deleted | — (also `204` without a session) |
-| `POST /api/auth/password` | `{ "currentPassword": string, "newPassword": string }` | `204`; every other session of the user is deleted | `401 UNAUTHENTICATED`, `401 INVALID_CREDENTIALS` (wrong current password), `400 WEAK_PASSWORD` (new password shorter than 12 characters or equal to the current one) |
+| `POST /api/auth/password` | `{ "currentPassword": string, "newPassword": string }` | `204`; every other session of the user is deleted | `401 UNAUTHENTICATED`, `401 INVALID_CREDENTIALS` (wrong current password), `400 WEAK_PASSWORD` (new password shorter than 12 characters or equal to the current one), `429 TOO_MANY_ATTEMPTS`, `503 SERVER_BUSY` |
+
+Once `POST /api/auth/password` answers `204` (or `create-superadmin --reset` finishes), no session
+opened with the previous password is valid, including one from a sign-in that was in progress: such
+a sign-in answers `401 INVALID_CREDENTIALS`.
+
+Sign-in limits (failed attempts; wrong current passwords on `POST /api/auth/password` count too):
+
+| Limit | Answer |
+| --- | --- |
+| 5 failures per username and client IP in 15 minutes | `429 TOO_MANY_ATTEMPTS`, `Retry-After`: seconds left in the window |
+| 30 failures per client IP in 15 minutes, across usernames | `429 TOO_MANY_ATTEMPTS`, `Retry-After`: seconds left in the window |
+| More than 10,000 usernames or client IPs being counted at once | `429 TOO_MANY_ATTEMPTS` for those not yet counted, until the oldest window ends |
+| More than 4 sign-in passwords being checked with 32 waiting (password changes: 2 with 8 waiting, counted apart) | `503 { "error": { "code": "SERVER_BUSY", ... } }` with `Retry-After: 2`; nothing was checked and it is not counted as a failure |
+
+A `429` is answered even for the right password.
 
 Other methods than `GET`/`OPTIONS` stay `405 METHOD_NOT_ALLOWED` outside `/api/auth/*`. There is no
 public sign-up: the super admin is created on the server with `node dist/create-superadmin.js`.

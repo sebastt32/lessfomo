@@ -1,11 +1,12 @@
 import { AuthError } from "../domain/auth-error.js";
 import type { LoginThrottle } from "../domain/login-throttle.js";
-import { hashPassword, verifyPassword, verifyPasswordOrDummy } from "../domain/password-hash.js";
+import { scryptPasswordHasher, type PasswordHasher } from "../domain/password-hash.js";
 import { isStrongEnoughPassword } from "../domain/password-policy.js";
 import type { SessionStore } from "../domain/session-store.js";
 import { hashSessionToken, isSessionToken, newSessionToken } from "../domain/session-token.js";
 import type { SessionUser } from "../domain/user.js";
 import type { UserStore } from "../domain/user-store.js";
+import { DEFAULT_SIGNED_IN_PASSWORD_WORK, WorkGate } from "../domain/work-gate.js";
 
 /** A session's expiry and cookie are refreshed at most this often, so reads do not write on every request. */
 const REFRESH_INTERVAL_MS = 60_000;
@@ -17,6 +18,12 @@ export interface AuthServiceDependencies {
   /** How long a session lives after its last request. */
   readonly sessionMs: number;
   readonly throttle: LoginThrottle;
+  /** Hashes and verifies passwords; scrypt unless a test replaces it. */
+  readonly passwords?: PasswordHasher;
+  /** Bounds how many sign-in passwords are verified at once; 4 with 32 waiting unless given. */
+  readonly passwordWork?: WorkGate;
+  /** The same bound for password changes, which only signed-in users can ask for; 2 with 8 waiting unless given. */
+  readonly signedInPasswordWork?: WorkGate;
 }
 
 export interface LoginResult {
@@ -41,7 +48,15 @@ export type SessionRevokedListener = (tokenHash: string) => void;
 export class AuthService {
   private readonly revokedListeners = new Set<SessionRevokedListener>();
 
-  constructor(private readonly deps: AuthServiceDependencies) {}
+  private readonly passwords: PasswordHasher;
+  private readonly passwordWork: WorkGate;
+  private readonly signedInPasswordWork: WorkGate;
+
+  constructor(private readonly deps: AuthServiceDependencies) {
+    this.passwords = deps.passwords ?? scryptPasswordHasher;
+    this.passwordWork = deps.passwordWork ?? new WorkGate();
+    this.signedInPasswordWork = deps.signedInPasswordWork ?? new WorkGate(DEFAULT_SIGNED_IN_PASSWORD_WORK);
+  }
 
   /** Lifetime of a session and of its cookie, in seconds. */
   get sessionMaxAgeSeconds(): number {
@@ -49,27 +64,26 @@ export class AuthService {
   }
 
   /**
-   * Opens a session, or throws `AuthError`: `TOO_MANY_ATTEMPTS` while the username and client IP
-   * are blocked (even for the right password), `INVALID_CREDENTIALS` for an unknown user and for a
-   * wrong password alike.
+   * Opens a session, or throws `AuthError`: `TOO_MANY_ATTEMPTS` while the username and client IP,
+   * or the client IP alone, are blocked (even for the right password), `SERVER_BUSY` when too many
+   * passwords are being checked (nothing is hashed), `INVALID_CREDENTIALS` for an unknown user and
+   * for a wrong password alike.
+   *
+   * The session is stored only if the user still has the password hash that was verified, so a
+   * sign-in that overlaps a password change or reset never leaves a session for the old password.
    */
   async login(username: string, password: string, clientIp: string): Promise<LoginResult> {
     const { users, sessions, clock, sessionMs, throttle } = this.deps;
     this.countAttempt(username, clientIp);
     const user = await users.findUserByUsername(username);
-    if (!(await verifyPasswordOrDummy(password, user?.passwordHash ?? null)) || user === null) {
-      throw new AuthError("INVALID_CREDENTIALS");
-    }
-    throttle.succeeded(username, clientIp);
+    const matches = await this.verify(this.passwordWork, password, user?.passwordHash ?? null, username, clientIp);
+    if (!matches || user === null) throw new AuthError("INVALID_CREDENTIALS");
     const { token, tokenHash } = newSessionToken();
     const now = clock();
-    await sessions.createSession({
-      tokenHash,
-      userId: user.id,
-      createdAt: now,
-      lastSeenAt: now,
-      expiresAt: new Date(now.getTime() + sessionMs),
-    });
+    const session = { tokenHash, userId: user.id, createdAt: now, lastSeenAt: now, expiresAt: new Date(now.getTime() + sessionMs) };
+    // The password was replaced while it was being verified: what was verified is no longer the credential.
+    if (!(await sessions.createVerifiedSession(session, user.passwordHash))) throw new AuthError("INVALID_CREDENTIALS");
+    throttle.succeeded(username, clientIp);
     return { token, user: { username: user.username, role: user.role }, maxAgeSeconds: this.sessionMaxAgeSeconds };
   }
 
@@ -111,19 +125,32 @@ export class AuthService {
   }
 
   /**
-   * Replaces the user's password and deletes every other session of that user. Throws `AuthError`:
-   * `INVALID_CREDENTIALS` for a wrong current password (limited like failed sign-ins),
-   * `WEAK_PASSWORD` for a new password that is too short or equal to the current one.
+   * Replaces the user's password and ends every other session of that user, in one step: when it
+   * resolves, no session opened with the old password is valid. Throws `AuthError`:
+   * `INVALID_CREDENTIALS` for a wrong current password (limited like failed sign-ins) or one that
+   * was replaced meanwhile, `WEAK_PASSWORD` for a new password that is too short or equal to the
+   * current one, `SERVER_BUSY` like `login`.
    */
   async changePassword(session: AuthenticatedSession, currentPassword: string, newPassword: string, clientIp: string): Promise<void> {
-    const { users, sessions, clock, throttle } = this.deps;
+    const { users, clock, throttle } = this.deps;
     this.countAttempt(session.user.username, clientIp);
     const user = await users.findUserById(session.userId);
-    if (user === null || !(await verifyPassword(currentPassword, user.passwordHash))) throw new AuthError("INVALID_CREDENTIALS");
+    const work = this.signedInPasswordWork;
+    const matches = await this.verify(work, currentPassword, user?.passwordHash ?? null, session.user.username, clientIp);
+    if (!matches || user === null) throw new AuthError("INVALID_CREDENTIALS");
     throttle.succeeded(session.user.username, clientIp);
     if (!isStrongEnoughPassword(newPassword) || newPassword === currentPassword) throw new AuthError("WEAK_PASSWORD");
-    await users.setPasswordHash(user.id, await hashPassword(newPassword), clock());
-    this.revoked(await sessions.deleteUserSessions(user.id, session.tokenHash));
+    const passwordHash = await work.run(() => this.passwords.hash(newPassword));
+    const revoked = await users.replacePassword({
+      userId: user.id,
+      passwordHash,
+      updatedAt: clock(),
+      expectedPasswordHash: user.passwordHash,
+      keepTokenHash: session.tokenHash,
+    });
+    // Somebody else replaced the password first: the one verified above is not the current one any more.
+    if (revoked === null) throw new AuthError("INVALID_CREDENTIALS");
+    this.revoked(revoked);
   }
 
   /** Calls `listener` with the token hash of every session this service deletes. Returns how to stop. */
@@ -135,6 +162,19 @@ export class AuthService {
   /** Deletes at most `limit` expired sessions; returns how many. */
   purgeExpired(limit: number): Promise<number> {
     return this.deps.sessions.deleteExpiredSessions(this.deps.clock(), limit);
+  }
+
+  /**
+   * Verifies a password within the bound on concurrent password work. A refusal for being busy
+   * checked nothing, so it is not counted as a failed attempt.
+   */
+  private async verify(work: WorkGate, password: string, stored: string | null, username: string, clientIp: string): Promise<boolean> {
+    try {
+      return await work.run(() => this.passwords.verify(password, stored));
+    } catch (error) {
+      if (error instanceof AuthError && error.code === "SERVER_BUSY") this.deps.throttle.forgive(username, clientIp);
+      throw error;
+    }
   }
 
   private countAttempt(username: string, clientIp: string): void {

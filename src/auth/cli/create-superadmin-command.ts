@@ -45,8 +45,7 @@ export const runCreateSuperadmin = async (args: readonly string[], env: Environm
     return 1;
   }
   try {
-    const { history } = store;
-    const result = await provisionSuperadmin({ users: history, sessions: history }, parsed.username, { reset: parsed.reset, now });
+    const result = await provisionSuperadmin({ users: store.history }, parsed.username, { reset: parsed.reset, now });
     if (result.outcome === "exists") {
       output.err(`User "${parsed.username}" already exists. Run again with --reset to set a new password (it signs the user out everywhere).`);
       return 1;

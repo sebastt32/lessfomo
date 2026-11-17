@@ -28,6 +28,8 @@ export const ApiErrors = {
   invalidCurrentPassword: () => new ApiError(401, "INVALID_CREDENTIALS", "Current password is not correct"),
   tooManyAttempts: (retryAfterSeconds: number) =>
     new ApiError(429, "TOO_MANY_ATTEMPTS", "Too many failed attempts, try again later", { "retry-after": String(retryAfterSeconds) }),
+  serverBusy: (retryAfterSeconds: number) =>
+    new ApiError(503, "SERVER_BUSY", "Too many sign-ins at once, try again shortly", { "retry-after": String(retryAfterSeconds) }),
   weakPassword: (minLength: number) =>
     new ApiError(400, "WEAK_PASSWORD", `New password must have at least ${minLength} characters and differ from the current one`),
   invalidBody: (expected: string) => new ApiError(400, "INVALID_BODY", `Invalid request body: expected ${expected}`),

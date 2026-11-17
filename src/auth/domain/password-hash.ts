@@ -91,3 +91,15 @@ export const verifyPasswordOrDummy = async (password: string, stored: string | n
   const matches = await verifyPassword(password, stored ?? (await dummyPasswordHash()));
   return stored !== null && matches;
 };
+
+/** How passwords are hashed and checked; replaceable in tests to control when a verification finishes. */
+export interface PasswordHasher {
+  hash(password: string): Promise<string>;
+  /** Like `verifyPasswordOrDummy`: false, at the same cost, when there is no stored hash. */
+  verify(password: string, stored: string | null): Promise<boolean>;
+}
+
+export const scryptPasswordHasher: PasswordHasher = {
+  hash: (password) => hashPassword(password),
+  verify: verifyPasswordOrDummy,
+};

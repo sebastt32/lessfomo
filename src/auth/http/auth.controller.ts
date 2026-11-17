@@ -15,6 +15,7 @@ import { buildSessionCookie, clearSessionCookie, parseSessionCookie } from "./se
 const refusal = (error: unknown, wrongPassword: () => Error): unknown => {
   if (!(error instanceof AuthError)) return error;
   if (error.code === "TOO_MANY_ATTEMPTS") return ApiErrors.tooManyAttempts(error.retryAfterSeconds ?? 1);
+  if (error.code === "SERVER_BUSY") return ApiErrors.serverBusy(error.retryAfterSeconds ?? 1);
   if (error.code === "WEAK_PASSWORD") return ApiErrors.weakPassword(MIN_PASSWORD_LENGTH);
   return wrongPassword();
 };
