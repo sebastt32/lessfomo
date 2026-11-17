@@ -387,7 +387,7 @@ interface TokenCycle {
 }
 ```
 
-`Mover` and `TokenListItem` gain `cycle: TokenCycle | null`, and `GET /api/tokens/:mint` gains a
+`Mover`, `TokenListItem` and `ScreeningView` gain `cycle: TokenCycle | null`, and `GET /api/tokens/:mint` gains a
 top-level `cycle`. `GET /api/tokens` accepts `phase` (comma-separated `stable`, `exploding`, `crashed`),
 `appearedLate` (`true`/`false`) and the sort fields `appearedAt` and `investWindow`. Candles accept
 the intervals `15m` and `1h` too, and `limit` is clamped to `1..2000`.
@@ -398,7 +398,7 @@ the intervals `15m` and `1h` too, and `limit` is clamped to `1..2000`.
 
 ### `GET /api/analysis/cycles?from=&to=`
 
-Aggregates over tokens that appeared in the range (default: last 7 days). No per-token data.
+Aggregates over tokens that appeared in the range (default: last 7 days). No per-token data. Every `*Pct` field goes from 0 to 100.
 
 ```json
 { "from": string, "to": string, "tokens": 491,
