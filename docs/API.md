@@ -355,6 +355,61 @@ Invalid values → `400 INVALID_QUERY` with a message naming the parameter.
 { "tokens": [TokenListItem], "page": 1, "pageSize": 50, "total": 1234 }
 ```
 
+### Token cycle
+
+For every public token the platform stores its cycle: stable after appearing, explosion, peak, crash.
+"Appeared" is the moment the token became public (the buy that reached the public conviction-wallet
+minimum), not its creation. Everything is derived from trades seen so far (never from later data);
+`peak*` and `maxDrawdownPct` keep updating while the token trades. Public tokens keep trade-by-trade
+data for 24 hours from creation (`PUBLIC_TRACKING_HOURS`), so candles and the per-token stream work
+for that long.
+
+```ts
+type CyclePhase = "stable" | "exploding" | "crashed";
+
+interface TokenCycle {
+  appearedAt: string;                 // when it became public in lessfomo
+  launchPriceSol: number | null;      // first trade seen
+  appearedPriceSol: number | null;    // base price: last trade at or before appearedAt
+  riseBeforeAppearanceX: number | null;   // appearedPriceSol / launchPriceSol
+  appearedLate: boolean;              // before appearing, price had already reached 2× its launch price
+  phase: CyclePhase;                  // stable: not yet 2× base; exploding: reached 2× base; crashed: fell to ≤ 50% of its peak
+  runStartAt: string | null;          // last trade before the explosion with price ≤ 1.2× base (appearedAt if none)
+  explosionAt: string | null;         // first trade with price ≥ 2× base
+  investWindowSeconds: number | null; // runStartAt − appearedAt (≥ 0) once exploded; negative when appearedLate
+                                      // (seconds between the earlier 2× and appearing); null while stable and not late
+  peakAt: string | null;              // maximum after the explosion
+  peakX: number | null;               // peak price / base price
+  crashAt: string | null;             // first trade with price ≤ 50% of the peak, after the peak
+  maxDrawdownPct: number | null;      // 0-100, deepest fall from the peak so far
+  lastPriceX: number | null;          // last price / base price
+  updatedAt: string;
+}
+```
+
+`Mover` and `TokenListItem` gain `cycle: TokenCycle | null`, and `GET /api/tokens/:mint` gains a
+top-level `cycle`. `GET /api/tokens` accepts `phase` (comma-separated `stable`, `exploding`, `crashed`),
+`appearedLate` (`true`/`false`) and the sort fields `appearedAt` and `investWindow`. Candles accept
+the intervals `15m` and `1h` too, and `limit` is clamped to `1..2000`.
+
+| Event | Stream | `data` | When |
+| --- | --- | --- | --- |
+| `cycle` | `/api/stream` and `/api/tokens/:mint/stream` | `{ "mint": string, "cycle": TokenCycle }` | The token appears, its phase changes, or a new peak is set (at most once every 10 s per token) |
+
+### `GET /api/analysis/cycles?from=&to=`
+
+Aggregates over tokens that appeared in the range (default: last 7 days). No per-token data.
+
+```json
+{ "from": string, "to": string, "tokens": 491,
+  "appearedInTimePct": 0, "appearedLatePct": 0, "explodedPct": 0, "neverExplodedPct": 0, "crashedPct": 0,
+  "medianInvestWindowSeconds": 0, "medianPeakX": 0, "medianSecondsToPeak": 0, "medianSecondsPeakToCrash": 0,
+  "windowBuckets": [ { "label": "late" | "<1m" | "1-5m" | "5-15m" | "15-60m" | ">1h", "tokens": 0,
+                       "medianPeakX": 0 } ] }
+```
+
+Statistics are `null` when there are no tokens to compute them from.
+
 ### Public visibility rule
 
 The public API only exposes tokens that have **at least `PUBLIC_MIN_CONVICTION_WALLETS` (default 3)
