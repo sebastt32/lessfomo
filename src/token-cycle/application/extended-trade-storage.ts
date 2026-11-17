@@ -9,6 +9,12 @@ export interface ExtendedToken {
   readonly creator: string;
   /** When it became public; decides which tokens are kept when full. */
   readonly appearedAt: Date;
+  /**
+   * End of its momentum window (creation plus the tracking window). Trades stamped before it are
+   * never kept here: that hour belongs to the momentum tracker alone, so the reputation close and
+   * the early snapshots read exactly the trades they read without extended storage (decision D2).
+   */
+  readonly startsAt: Date;
   /** End of its extended window: its creation plus `PUBLIC_TRACKING_HOURS`. */
   readonly expiresAt: Date;
 }
@@ -21,6 +27,7 @@ export interface ExtendedTradeStorageOptions {
 interface ExtendedState {
   readonly creator: string;
   readonly appearedAt: number;
+  readonly startsAt: number;
   readonly expiresAt: number;
   /** Trade key → trade time, to accept each trade once. */
   readonly seen: Map<string, number>;
@@ -47,6 +54,7 @@ export class ExtendedTradeStorage {
     const state: ExtendedState = {
       creator: token.creator,
       appearedAt: token.appearedAt.getTime(),
+      startsAt: token.startsAt.getTime(),
       expiresAt: token.expiresAt.getTime(),
       seen: new Map(),
     };
@@ -82,7 +90,10 @@ export class ExtendedTradeStorage {
     return this.tokens.get(mint)?.creator;
   }
 
-  /** Notes a trade. True when it belongs to an extended token, inside its window, and was not seen before. */
+  /**
+   * Notes a trade. True when it belongs to an extended token, is stamped inside its extended window
+   * (after the momentum window, before the expiry) and was not seen before.
+   */
   record(trade: Trade): boolean {
     const state = this.tokens.get(trade.mint);
     const time = trade.timestamp.getTime();
@@ -90,7 +101,7 @@ export class ExtendedTradeStorage {
     const key = tradeKey(trade);
     if (state.seen.has(key)) return false;
     state.seen.set(key, time);
-    return true;
+    return time >= state.startsAt;
   }
 
   /** Forgets tokens whose extended window ended (returned) and trades seen more than five minutes ago. */

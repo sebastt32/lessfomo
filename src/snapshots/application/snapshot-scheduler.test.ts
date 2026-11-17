@@ -168,6 +168,21 @@ describe("SnapshotScheduler", () => {
     });
   });
 
+  it("leaves trades stamped after the live window out of the snapshots taken from stored trades", async () => {
+    // Public tokens keep storing trades after the window; the 1h snapshot must not change because of it.
+    const { detect, tradeLive, at, snapshots } = setup();
+    await detect(token("a"));
+    await tradeLive(trade("a", T0 + 1_000));
+    await at(30 * MINUTE + 2_000);
+    await tradeLive(trade("a", T0 + 50 * MINUTE, { solAmount: 2 }));
+    await tradeLive(trade("a", T0 + 60 * MINUTE + 1_000, { side: "sell", solAmount: 7 }));
+
+    await at(60 * MINUTE + 3_000);
+
+    const taken = await snapshots("a");
+    expect(taken.find((s) => s.milestone === "1h")).toMatchObject({ volumeSol: 2, buys: 1, sells: 0 });
+  });
+
   it("waits 5 seconds after creation for the creation trade to arrive before taking 0m", async () => {
     const { detect, scheduler, tradeLive, at, snapshots } = setup();
     await detect(token("a"));

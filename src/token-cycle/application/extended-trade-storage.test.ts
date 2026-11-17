@@ -26,7 +26,13 @@ const trade = (mint: string, ms: number, overrides: Partial<Trade> = {}): Trade 
 });
 
 /** A public token created at T0 whose trades are kept for 24 hours. */
-const publicToken = (mint: string, appearedMs = MINUTE) => ({ mint, creator: "dev", appearedAt: at(appearedMs), expiresAt: at(24 * HOUR) });
+const publicToken = (mint: string, appearedMs = MINUTE) => ({
+  mint,
+  creator: "dev",
+  appearedAt: at(appearedMs),
+  startsAt: at(HOUR),
+  expiresAt: at(24 * HOUR),
+});
 
 describe("ExtendedTradeStorage", () => {
   it("keeps the trades of public tokens only, until their extended window ends", () => {
@@ -41,6 +47,26 @@ describe("ExtendedTradeStorage", () => {
     expect(extended.has("other")).toBe(false);
     expect(extended.creatorOf("public")).toBe("dev");
     expect(extended.creatorOf("other")).toBeUndefined();
+  });
+
+  it("never keeps a trade stamped inside the momentum window, even when nothing else is following the token", () => {
+    // After a restart the momentum tracker follows no earlier token; the first hour must stay as on main.
+    const extended = new ExtendedTradeStorage({ maxTokens: 10 });
+    extended.extend(publicToken("public"));
+    const idle = { record: () => false, isTracking: () => false };
+
+    expect(routeTrade(trade("public", 40 * MINUTE), idle, extended)).toBe("ignored");
+    expect(routeTrade(trade("public", HOUR - 1000), idle, extended)).toBe("ignored");
+    expect(routeTrade(trade("public", HOUR), idle, extended)).toBe("extended");
+  });
+
+  it("does not keep again, after the window, a trade it already saw inside it", () => {
+    const extended = new ExtendedTradeStorage({ maxTokens: 10 });
+    extended.extend(publicToken("public"));
+    const inside = trade("public", HOUR - 1000);
+
+    expect(extended.record(inside)).toBe(false);
+    expect(extended.record({ ...inside })).toBe(false);
   });
 
   it("accepts each trade once", () => {

@@ -215,7 +215,11 @@ export class SnapshotScheduler {
   }
 
   private async takeFromTrades(due: DueToken, resolved: DueMilestone, now: Date): Promise<void> {
-    const window = await this.options.store.tradeWindow(due.mint, due.lastSnapshotAt, now);
+    // Only trades of the live window: public tokens keep storing trades after it, and those must not
+    // change the snapshots taken from stored trades.
+    const liveEnd = new Date(due.detectedAt.getTime() + this.options.trackingWindowMs);
+    const until = now.getTime() < liveEnd.getTime() ? now : liveEnd;
+    const window = await this.options.store.tradeWindow(due.mint, due.lastSnapshotAt, until);
     const watched = this.watch.get(due.mint);
     const snapshot = snapshotFromTrades({
       mint: due.mint,

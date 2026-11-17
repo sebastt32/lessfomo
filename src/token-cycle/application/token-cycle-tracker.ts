@@ -21,6 +21,8 @@ export interface TokenCycleTrackerOptions {
   readonly publicMinConvictionWallets: number;
   /** A public token keeps trade-by-trade data this long after its creation (`PUBLIC_TRACKING_HOURS`). */
   readonly publicTrackingMs: number;
+  /** The momentum window; extended storage only keeps trades stamped after it. */
+  readonly trackingWindowMs: number;
   /** First buys of the conviction wallets the live tracker rated in a token, earliest first. */
   readonly convictionFirstBuys: (mint: string) => readonly Date[];
   /** The public visibility rule: only cycles of public tokens are published. */
@@ -213,7 +215,8 @@ export class TokenCycleTracker {
   private follow(token: CycleToken, appearedAt: Date): void {
     const expiresAt = new Date(token.detectedAt.getTime() + this.options.publicTrackingMs);
     if (this.clock().getTime() >= expiresAt.getTime()) return;
-    const dropped = this.options.extended.extend({ mint: token.mint, creator: token.creator, appearedAt, expiresAt });
+    const startsAt = new Date(token.detectedAt.getTime() + this.options.trackingWindowMs);
+    const dropped = this.options.extended.extend({ mint: token.mint, creator: token.creator, appearedAt, startsAt, expiresAt });
     for (const mint of dropped) this.cache.delete(mint);
   }
 

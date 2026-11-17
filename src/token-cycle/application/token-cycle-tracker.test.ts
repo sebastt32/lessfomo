@@ -89,6 +89,7 @@ const setup = (overrides: Partial<TokenCycleTrackerOptions> = {}, store = new Sq
     extended,
     publicMinConvictionWallets: 2,
     publicTrackingMs: 24 * HOUR,
+    trackingWindowMs: HOUR,
     convictionFirstBuys: (mint) => firstBuys.get(mint) ?? [],
     isPublic: async (mint) => !hidden.has(mint),
     onCycle: (mint, cycle) => updates.push({ mint, cycle }),

@@ -47,6 +47,7 @@ const report = (error: unknown): void => console.error(`[cycles] ${errorMessage(
           extended,
           publicMinConvictionWallets: minimum,
           publicTrackingMs: config.tokenCycle.publicTrackingMs,
+          trackingWindowMs: config.momentum.trackingWindowMs,
           convictionFirstBuys: (mint) => smartWallets.convictionFirstBuys(mint),
           // The public visibility rule: live count while the token is followed, else the stored one.
           isPublic: async (mint) => feed.isPublic(mint) || (await reputation.tokenSmartSummary(mint)).conviction >= minimum,
