@@ -180,6 +180,10 @@ tracking window ends (realized SOL from sells, plus remaining tokens valued at t
 ```ts
 type WalletTier = "elite" | "good" | "none";
 
+/** How a wallet usually trades (point-in-time, from the same prior results as its tier).
+ *  A "flip" is a token it sold within 120 s of its first buy (sells after the token's close ignored). */
+type WalletStyle = "conviction" | "flipper" | "mixed" | "unrated";   // conviction: flip rate ≤ 30%; flipper: ≥ 60%; unrated: tier none
+
 interface WalletRecord {
   address: string;
   tier: WalletTier;               // current tier (from closed results in the last 7 days)
@@ -190,6 +194,9 @@ interface WalletRecord {
   netPnlSol: number;              // sum of closed results, last 7 days
   avgPnlSol: number;
   medianEntrySeconds: number | null;  // seconds from token creation to its first buy
+  style: WalletStyle;             // current style (last 7 days)
+  flipRate: number | null;        // 0-100, share of closed tokens sold within 120 s; null when no closed tokens
+  medianHoldSeconds: number | null;   // first buy to first sell; tokens never sold before close are excluded
   lastActiveAt: string | null;
   updatedAt: string;
 }
@@ -204,6 +211,7 @@ interface WalletTokenResult {
 interface SmartWalletInToken {
   address: string;
   tierAtEntry: WalletTier;        // point-in-time tier when it first bought this token
+  styleAtEntry: WalletStyle;      // point-in-time style when it first bought this token
   record: WalletRecord;           // current record, to explain why it is good
   firstBuyAt: string; entrySeconds: number;
   boughtSol: number; soldSol: number;
@@ -212,7 +220,8 @@ interface SmartWalletInToken {
 ```
 
 `Mover`, `TokenListItem` and `ScreeningView` gain `smartWallets: { count: number; elite: number; holding: number }`
-(good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding).
+(good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding) and a new
+`conviction: number` (of those, how many had the conviction style at entry).
 
 ## Endpoints
 
@@ -297,8 +306,9 @@ Invalid values → `400 INVALID_QUERY` with a message naming the parameter.
 
 ### Public visibility rule
 
-The public API only exposes tokens that have **at least `PUBLIC_MIN_SMART_WALLETS` (default 5)
-good-or-elite wallets** (point-in-time tier at entry). Every token-level endpoint and event applies it: `/api/movers`, `/api/screenings`,
+The public API only exposes tokens that have **at least `PUBLIC_MIN_CONVICTION_WALLETS` (default 3)
+conviction wallets**: good-or-elite wallets whose point-in-time style at entry was `conviction`.
+Flippers and mixed wallets are shown in token details but never make a token public. Every token-level endpoint and event applies it: `/api/movers`, `/api/screenings`,
 `/api/tokens` (list), `/api/tokens/:mint`, `/candles`, `/snapshots`, `/smart-wallets`,
 `/api/tokens/:mint/stream`, and the `token`, `screening`, `momentum` and `smart-wallet` events on
 `/api/stream`. A token that does not qualify answers `404 TOKEN_NOT_FOUND` exactly as if it did not
