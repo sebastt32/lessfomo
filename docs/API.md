@@ -211,7 +211,7 @@ interface SmartWalletInToken {
 }
 ```
 
-`Mover` and `TokenListItem` gain `smartWallets: { count: number; elite: number; holding: number }`
+`Mover`, `TokenListItem` and `ScreeningView` gain `smartWallets: { count: number; elite: number; holding: number }`
 (good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding).
 
 ## Endpoints
