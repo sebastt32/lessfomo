@@ -171,6 +171,49 @@ interface TokenListItem {
 
 `Mover` gains `liquidity: Liquidity`. `TokenView.detectedAt` is shown as the creation date and time.
 
+### Smart wallets
+
+A wallet's reputation is **point-in-time**: when it buys a token, its tier comes only from tokens
+whose results closed before that buy. A token's result per wallet closes when the token's live
+tracking window ends (realized SOL from sells, plus remaining tokens valued at the last observed price).
+
+```ts
+type WalletTier = "elite" | "good" | "none";
+
+interface WalletRecord {
+  address: string;
+  tier: WalletTier;               // current tier (from closed results in the last 7 days)
+  isBot: boolean;                 // trades ≥ 20 distinct tokens per hour on average
+  tokens: number;                 // closed tokens in the last 7 days
+  wins: number;                   // closed tokens with positive result
+  winRate: number;                // 0-100
+  netPnlSol: number;              // sum of closed results, last 7 days
+  avgPnlSol: number;
+  medianEntrySeconds: number | null;  // seconds from token creation to its first buy
+  lastActiveAt: string | null;
+  updatedAt: string;
+}
+
+interface WalletTokenResult {
+  mint: string; symbol: string; name: string;
+  firstBuyAt: string; entrySeconds: number;   // seconds after the token's creation
+  boughtSol: number; soldSol: number; pnlSol: number;
+  closedAt: string;
+}
+
+interface SmartWalletInToken {
+  address: string;
+  tierAtEntry: WalletTier;        // point-in-time tier when it first bought this token
+  record: WalletRecord;           // current record, to explain why it is good
+  firstBuyAt: string; entrySeconds: number;
+  boughtSol: number; soldSol: number;
+  stillHolding: boolean;          // positive balance per observed trades
+}
+```
+
+`Mover` and `TokenListItem` gain `smartWallets: { count: number; elite: number; holding: number }`
+(good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding).
+
 ## Endpoints
 
 ### `GET /api/health`
@@ -250,6 +293,45 @@ Invalid values → `400 INVALID_QUERY` with a message naming the parameter.
 
 ```json
 { "tokens": [TokenListItem], "page": 1, "pageSize": 50, "total": 1234 }
+```
+
+### Smart-wallet filters
+
+`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (integer ≥ 0, default `0`) and
+`/api/tokens` also accepts `sort=smartWallets:desc`. `GET /api/screenings` accepts `minSmartWallets`
+too. Invalid values → `400 INVALID_QUERY`. Live SSE events are unchanged; clients filter `momentum`
+movers by `smartWallets.count`, and a new SSE event on `/api/stream` reports changes:
+
+| Event | `data` | When |
+| --- | --- | --- |
+| `smart-wallet` | `{ "mint": string, "smartWallets": { count, elite, holding }, "wallet": SmartWalletInToken }` | A good-or-elite wallet buys or fully sells a token |
+
+### `GET /api/tokens/:mint/smart-wallets`
+
+```json
+{ "mint": string, "smartWallets": [SmartWalletInToken] }   // elite first, then by entrySeconds
+```
+
+### `GET /api/wallets/:address`
+
+Same `400 INVALID_MINT`-style validation for the address (code `INVALID_ADDRESS`); `404 WALLET_NOT_FOUND`.
+
+```json
+{ "record": WalletRecord, "results": [WalletTokenResult] }   // newest first, last 7 days, max 200
+```
+
+### `GET /api/analysis/smart-wallets?from=&to=`
+
+How success changes with the number of good-or-elite wallets (point-in-time tiers) that bought a
+token within its live window. Buckets `0`, `1`, `2`, `3`, `4`, `5+`. Entry for each token in a bucket
+is the price right after the k-th smart wallet's first buy (k = bucket size, `0` = the token's
+safety-check time), exits at 2× or after 10 minutes, with a 3% round-trip cost.
+
+```json
+{ "from": string, "to": string, "costRoundTrip": 0.03,
+  "buckets": [ { "smartWallets": "0", "tokens": 1234,
+                 "reached2xPct": 3.1, "migratedPct": 0.4, "avgReturnPct": -4.2, "medianReturnPct": -6.0,
+                 "winnersPct": 12.5, "medianPeakX": 1.1 } ] }
 ```
 
 ### `GET /api/tokens/:mint/snapshots`
