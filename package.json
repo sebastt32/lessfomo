@@ -6,6 +6,7 @@
     "test": "vitest run --passWithNoTests",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
+    "create-superadmin": "node dist/create-superadmin.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit"
   },

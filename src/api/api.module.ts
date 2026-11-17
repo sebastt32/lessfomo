@@ -1,5 +1,7 @@
 import { Module, type MiddlewareConsumer, type NestModule } from "@nestjs/common";
 import { APP_FILTER } from "@nestjs/core";
+import { AuthModule } from "../auth/auth.module.js";
+import { AuthRequestMiddleware, SessionGuardMiddleware } from "../auth/http/auth.middleware.js";
 import { HistoryModule } from "../history/history.module.js";
 import { LiveFeedModule } from "../live-feed/live-feed.module.js";
 import { MarketPriceModule } from "../market-price/market-price.module.js";
@@ -18,9 +20,9 @@ import { CorsMiddleware, GetOnlyMiddleware, RequestTargetMiddleware } from "./ht
 import { LiveStreams } from "./live-streams.js";
 import { TokenVisibility } from "./token-visibility.js";
 
-/** The read-only HTTP + SSE API described in docs/API.md. */
+/** The HTTP + SSE API described in docs/API.md: read-only, behind the sign-in of `AuthModule`. */
 @Module({
-  imports: [LiveFeedModule, HistoryModule, MarketPriceModule, WalletReputationModule],
+  imports: [LiveFeedModule, HistoryModule, MarketPriceModule, WalletReputationModule, AuthModule],
   controllers: [
     HealthController,
     MoversController,
@@ -40,11 +42,15 @@ import { TokenVisibility } from "./token-visibility.js";
 })
 export class ApiModule implements NestModule {
   /**
-   * In this order, before routing: CORS and preflight, then 405, then 400 for an unparsable target.
+   * In this order, before routing: CORS and preflight, then the session guard (401 for everything
+   * but the health check, sign-in and sign-out), then 405, then 400 for an unparsable target, then
+   * the CSRF check and JSON body of the auth POSTs.
    * Mounted on "/" (a plain prefix, no route parameters) so Express never tries to percent-decode the
    * path first: with a wildcard parameter, broken encodings skipped these middlewares entirely.
    */
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(CorsMiddleware, GetOnlyMiddleware, RequestTargetMiddleware).forRoutes("/");
+    consumer
+      .apply(CorsMiddleware, SessionGuardMiddleware, GetOnlyMiddleware, RequestTargetMiddleware, AuthRequestMiddleware)
+      .forRoutes("/");
   }
 }

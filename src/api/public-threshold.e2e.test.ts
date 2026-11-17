@@ -12,6 +12,7 @@ import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
 import type { WalletRecord, WalletStyle } from "../wallet-reputation/domain/reputation-rules.js";
 import type { SmartWalletEntry } from "../wallet-reputation/domain/wallet-reputation-store.js";
+import { createTestSession } from "../auth/testing/signed-in.js";
 import { ApiModule } from "./api.module.js";
 import { API_ERROR_REPORTER } from "./http/api-exception.filter.js";
 import { API_APPLICATION_OPTIONS, createApiHttpAdapter } from "./http/api-http-adapter.js";
@@ -89,6 +90,10 @@ const momentum = (mint: string, score: number) => ({
   },
 });
 
+/** Every request of this file is made by a signed-in session (docs/API.md "Authentication"). */
+const session = createTestSession();
+const fetch = session.fetch;
+
 let app: INestApplication | null = null;
 afterEach(async () => {
   await app?.close();
@@ -119,7 +124,8 @@ const start = async () => {
     });
   }
   const feed = new LiveFeed(config.api.publicMinConvictionWallets);
-  const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] })
+  const moduleRef = await session
+    .signIn(Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] }))
     .overrideProvider(LIVE_FEED)
     .useValue(feed)
     .overrideProvider(HISTORY_STORE)

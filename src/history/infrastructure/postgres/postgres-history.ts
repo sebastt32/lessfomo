@@ -99,6 +99,24 @@ import {
   walletResultsStatement,
   WALLETS_PER_QUERY,
 } from "../wallet-reputation-sql.js";
+import type { SessionStore } from "../../../auth/domain/session-store.js";
+import type { Session, SessionWithUser, User } from "../../../auth/domain/user.js";
+import type { NewUser, UserStore } from "../../../auth/domain/user-store.js";
+import {
+  authDdl,
+  createSessionStatement,
+  createUserStatement,
+  deleteExpiredSessionsStatement,
+  deleteSessionStatement,
+  deleteUserSessionsStatement,
+  sessionStatement,
+  setPasswordHashStatement,
+  toSessionWithUser,
+  toUser,
+  touchSessionStatement,
+  userByIdStatement,
+  userByUsernameStatement,
+} from "../auth-sql.js";
 import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
 import {
   candlesSql,
@@ -186,6 +204,7 @@ CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
 ${tokenStateDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
 ${tokenSnapshotsDdl({ id: "BIGSERIAL PRIMARY KEY", real: "DOUBLE PRECISION", time: "BIGINT" })}
 ${walletReputationDdl({ real: "DOUBLE PRECISION", time: "BIGINT" })}
+${authDdl({ time: "BIGINT" })}
 `;
 
 /** Serializes concurrent migrations (e.g. two containers starting during a redeploy). */
@@ -239,7 +258,7 @@ export interface PostgresHistoryOptions {
 
 /** Stores and reads history in PostgreSQL. Every query is parameterized. */
 export class PostgresHistory
-  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore
+  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore
 {
   private constructor(private readonly pool: pg.Pool) {}
 
@@ -482,6 +501,49 @@ export class PostgresHistory
 
   async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return (await this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to))).map(toStoredOutcome);
+  }
+
+  async createUser(user: NewUser): Promise<boolean> {
+    return (await this.rows(createUserStatement(CHART_DIALECT, user))).length > 0;
+  }
+
+  async findUserByUsername(username: string): Promise<User | null> {
+    const [row] = await this.rows(userByUsernameStatement(CHART_DIALECT, username));
+    return row === undefined ? null : toUser(row);
+  }
+
+  async findUserById(id: string): Promise<User | null> {
+    const [row] = await this.rows(userByIdStatement(CHART_DIALECT, id));
+    return row === undefined ? null : toUser(row);
+  }
+
+  async setPasswordHash(userId: string, passwordHash: string, updatedAt: Date): Promise<void> {
+    await this.rows(setPasswordHashStatement(CHART_DIALECT, userId, passwordHash, updatedAt));
+  }
+
+  async createSession(session: Session): Promise<void> {
+    await this.rows(createSessionStatement(CHART_DIALECT, session));
+  }
+
+  async findSession(tokenHash: string): Promise<SessionWithUser | null> {
+    const [row] = await this.rows(sessionStatement(CHART_DIALECT, tokenHash));
+    return row === undefined ? null : toSessionWithUser(row);
+  }
+
+  async touchSession(tokenHash: string, lastSeenAt: Date, expiresAt: Date): Promise<void> {
+    await this.rows(touchSessionStatement(CHART_DIALECT, tokenHash, lastSeenAt, expiresAt));
+  }
+
+  async deleteSession(tokenHash: string): Promise<void> {
+    await this.rows(deleteSessionStatement(CHART_DIALECT, tokenHash));
+  }
+
+  async deleteUserSessions(userId: string, exceptTokenHash: string | null): Promise<string[]> {
+    return (await this.rows(deleteUserSessionsStatement(CHART_DIALECT, userId, exceptTokenHash))).map((row) => String(row["token_hash"]));
+  }
+
+  async deleteExpiredSessions(now: Date, limit: number): Promise<number> {
+    return (await this.rows(deleteExpiredSessionsStatement(CHART_DIALECT, now, limit))).length;
   }
 
   /**

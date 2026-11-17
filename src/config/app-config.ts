@@ -13,6 +13,12 @@ export interface AppConfig {
     /** Conviction wallets at entry a token needs to be public (docs/API.md "Public visibility rule", decision D7). */
     readonly publicMinConvictionWallets: number;
   };
+  readonly auth: {
+    /** Always mark the session cookie `Secure`; otherwise it follows `X-Forwarded-Proto` (decision D2). */
+    readonly cookieSecure: boolean;
+    /** Days a session lives after its last request (sliding). */
+    readonly sessionDays: number;
+  };
   readonly history: {
     /** PostgreSQL when set, otherwise SQLite at `sqlitePath`. */
     readonly databaseUrl: string | undefined;
@@ -81,6 +87,10 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
       .filter((origin) => origin.length > 0),
     heartbeatMs: 15_000,
     publicMinConvictionWallets: readPositiveInteger(env, "PUBLIC_MIN_CONVICTION_WALLETS", 3),
+  },
+  auth: {
+    cookieSecure: env["AUTH_COOKIE_SECURE"] === "true",
+    sessionDays: readPositiveInteger(env, "AUTH_SESSION_DAYS", 7),
   },
   history: {
     databaseUrl: env["DATABASE_URL"] || undefined,

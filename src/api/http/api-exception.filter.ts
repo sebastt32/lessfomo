@@ -37,6 +37,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       }
       error = ApiErrors.internal();
     }
+    for (const [name, value] of Object.entries(error.headers)) response.setHeader(name, value);
     response.status(error.status).json({ error: { code: error.code, message: error.message } });
   }
 }

@@ -100,6 +100,24 @@ import {
   walletResultsStatement,
   WALLETS_PER_QUERY,
 } from "../wallet-reputation-sql.js";
+import type { SessionStore } from "../../../auth/domain/session-store.js";
+import type { Session, SessionWithUser, User } from "../../../auth/domain/user.js";
+import type { NewUser, UserStore } from "../../../auth/domain/user-store.js";
+import {
+  authDdl,
+  createSessionStatement,
+  createUserStatement,
+  deleteExpiredSessionsStatement,
+  deleteSessionStatement,
+  deleteUserSessionsStatement,
+  sessionStatement,
+  setPasswordHashStatement,
+  toSessionWithUser,
+  toUser,
+  touchSessionStatement,
+  userByIdStatement,
+  userByUsernameStatement,
+} from "../auth-sql.js";
 import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
 import {
   candlesSql,
@@ -185,6 +203,7 @@ CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
 ${tokenStateDdl({ real: "REAL", time: "INTEGER" })}
 ${tokenSnapshotsDdl({ id: "INTEGER PRIMARY KEY AUTOINCREMENT", real: "REAL", time: "INTEGER" })}
 ${walletReputationDdl({ real: "REAL", time: "INTEGER" })}
+${authDdl({ time: "INTEGER" })}
 `;
 
 const CHART_DIALECT: ChartDialect = { param: (index) => `?${index}`, sequence: "rowid" };
@@ -193,7 +212,7 @@ const CATALOG_DIALECT: CatalogDialect = { ...CHART_DIALECT, typed: (index) => `?
 
 /** Stores and reads history in a local SQLite file using Node's built-in driver (no dependencies). */
 export class SqliteHistoryRecorder
-  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore
+  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore
 {
   private readonly db: DatabaseSync;
   private readonly insertToken: StatementSync;
@@ -205,7 +224,8 @@ export class SqliteHistoryRecorder
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+    // Waits instead of failing when another process (create-superadmin next to the running app) holds the write lock.
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     this.db.exec(SCHEMA);
     this.addColumns();
     this.db.exec(backfillTokenStateSql(CHART_DIALECT));
@@ -416,6 +436,49 @@ export class SqliteHistoryRecorder
 
   async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to)).map(toStoredOutcome);
+  }
+
+  async createUser(user: NewUser): Promise<boolean> {
+    return this.rows(createUserStatement(CHART_DIALECT, user)).length > 0;
+  }
+
+  async findUserByUsername(username: string): Promise<User | null> {
+    const [row] = this.rows(userByUsernameStatement(CHART_DIALECT, username));
+    return row === undefined ? null : toUser(row);
+  }
+
+  async findUserById(id: string): Promise<User | null> {
+    const [row] = this.rows(userByIdStatement(CHART_DIALECT, id));
+    return row === undefined ? null : toUser(row);
+  }
+
+  async setPasswordHash(userId: string, passwordHash: string, updatedAt: Date): Promise<void> {
+    this.run(setPasswordHashStatement(CHART_DIALECT, userId, passwordHash, updatedAt));
+  }
+
+  async createSession(session: Session): Promise<void> {
+    this.run(createSessionStatement(CHART_DIALECT, session));
+  }
+
+  async findSession(tokenHash: string): Promise<SessionWithUser | null> {
+    const [row] = this.rows(sessionStatement(CHART_DIALECT, tokenHash));
+    return row === undefined ? null : toSessionWithUser(row);
+  }
+
+  async touchSession(tokenHash: string, lastSeenAt: Date, expiresAt: Date): Promise<void> {
+    this.run(touchSessionStatement(CHART_DIALECT, tokenHash, lastSeenAt, expiresAt));
+  }
+
+  async deleteSession(tokenHash: string): Promise<void> {
+    this.run(deleteSessionStatement(CHART_DIALECT, tokenHash));
+  }
+
+  async deleteUserSessions(userId: string, exceptTokenHash: string | null): Promise<string[]> {
+    return this.rows(deleteUserSessionsStatement(CHART_DIALECT, userId, exceptTokenHash)).map((row) => String(row["token_hash"]));
+  }
+
+  async deleteExpiredSessions(now: Date, limit: number): Promise<number> {
+    return this.rows(deleteExpiredSessionsStatement(CHART_DIALECT, now, limit)).length;
   }
 
   /** Adds the columns of later versions to existing derived tables, once (SQLite has no ADD COLUMN IF NOT EXISTS). */

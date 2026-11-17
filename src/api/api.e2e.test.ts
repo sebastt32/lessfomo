@@ -21,10 +21,15 @@ import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
 import type { MomentumSnapshot } from "../momentum/application/momentum-tracker.js";
 import type { Trade } from "../momentum/domain/trade.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
+import { createTestSession } from "../auth/testing/signed-in.js";
 import { ApiModule } from "./api.module.js";
 import { API_ERROR_REPORTER } from "./http/api-exception.filter.js";
 import { API_APPLICATION_OPTIONS, createApiHttpAdapter } from "./http/api-http-adapter.js";
 import { LiveStreams } from "./live-streams.js";
+
+/** Every request of this file is made by a signed-in session (docs/API.md "Authentication"). */
+const session = createTestSession();
+const fetch = session.fetch;
 
 const MINT = "E3rpattxgipu5MoxktjsXHwEaYVfmowta9tnCp6bpump";
 const STARTED_AT = new Date("2026-11-13T20:00:00.000Z");
@@ -297,7 +302,8 @@ const start = async (options: { heartbeatMs?: number } = {}) => {
   const history = new FakeHistory();
   const solPrice = new FakeSolPrice();
   const reported: unknown[] = [];
-  const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(configWith(options)), ApiModule] })
+  const moduleRef = await session
+    .signIn(Test.createTestingModule({ imports: [ConfigModule.forRoot(configWith(options)), ApiModule] }))
     .overrideProvider(LIVE_FEED)
     .useValue(feed)
     .overrideProvider(HISTORY_STORE)
@@ -324,7 +330,7 @@ afterEach(async () => {
 const rawRequest = (base: string, head: string): Promise<string> =>
   new Promise((resolve, reject) => {
     const { port } = new URL(base);
-    const socket = connect(Number(port), "127.0.0.1", () => socket.write(`${head}\r\nHost: localhost\r\nConnection: close\r\n\r\n`));
+    const socket = connect(Number(port), "127.0.0.1", () => socket.write(`${head}\r\nHost: localhost\r\nCookie: ${session.cookie}\r\nConnection: close\r\n\r\n`));
     let raw = "";
     socket.on("data", (chunk) => (raw += chunk.toString()));
     socket.on("end", () => resolve(raw));

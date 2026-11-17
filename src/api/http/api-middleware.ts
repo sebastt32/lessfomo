@@ -2,7 +2,7 @@ import { Inject, Injectable, type NestMiddleware } from "@nestjs/common";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { APP_CONFIG, type AppConfig } from "../../config/app-config.js";
 import { ApiErrors } from "./api-error.js";
-import { hasInvalidRequestTarget } from "./request-target.js";
+import { hasInvalidRequestTarget, isAuthPath } from "./request-target.js";
 
 type Next = (error?: unknown) => void;
 
@@ -19,10 +19,19 @@ export class CorsMiddleware implements NestMiddleware<IncomingMessage, ServerRes
     const origin = request.headers.origin;
     if (origin !== undefined && this.origins.includes(origin)) {
       response.setHeader("access-control-allow-origin", origin);
+      // The session cookie travels with cross-origin requests of allowed origins only.
+      response.setHeader("access-control-allow-credentials", "true");
+      // Lets a cross-origin page read how long to wait after 429 TOO_MANY_ATTEMPTS.
+      response.setHeader("access-control-expose-headers", "Retry-After");
       response.setHeader("vary", "Origin");
     }
     if (request.method === "OPTIONS") {
-      response.writeHead(204, { "access-control-allow-methods": "GET, OPTIONS", "access-control-max-age": "600" });
+      const headers: Record<string, string> = { "access-control-allow-methods": "GET, OPTIONS", "access-control-max-age": "600" };
+      if (isAuthPath(request)) {
+        headers["access-control-allow-methods"] = "GET, POST, OPTIONS";
+        headers["access-control-allow-headers"] = "Content-Type";
+      }
+      response.writeHead(204, headers);
       response.end();
       return;
     }
@@ -30,11 +39,15 @@ export class CorsMiddleware implements NestMiddleware<IncomingMessage, ServerRes
   }
 }
 
-/** The API is read-only: any method but GET (and the OPTIONS preflight) is 405. */
+/**
+ * The API is read-only: any method but GET (and the OPTIONS preflight) is 405, except POST under
+ * `/api/auth/` (sign in, sign out, change password).
+ */
 @Injectable()
 export class GetOnlyMiddleware implements NestMiddleware<IncomingMessage, ServerResponse> {
   use(request: IncomingMessage, _response: ServerResponse, next: Next): void {
-    if (request.method !== "GET") throw ApiErrors.methodNotAllowed();
+    const allowed = request.method === "GET" || (request.method === "POST" && isAuthPath(request));
+    if (!allowed) throw ApiErrors.methodNotAllowed();
     next();
   }
 }

@@ -10,6 +10,8 @@ export const API_APPLICATION_OPTIONS = {
   logger: false,
   /** Closing the API also drops idle keep-alive connections, so shutdown never waits for clients. */
   forceCloseConnections: true,
+  /** No global body parser: only `/api/auth/*` reads a (small, JSON) body, with its own reader. */
+  bodyParser: false,
 } as const satisfies NestApplicationOptions;
 
 /**

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_APPLICATION_OPTIONS, createApiHttpAdapter } from "./api/http/api-http-adapter.js";
 import { LiveStreams } from "./api/live-streams.js";
 import { AppModule } from "./app.module.js";
+import { createTestSession } from "./auth/testing/signed-in.js";
 import { createLessfomoApp, runLessfomo } from "./bootstrap.js";
 import { loadAppConfig, type AppConfig } from "./config/app-config.js";
 import { HISTORY_STORE } from "./history/history.module.js";
@@ -19,6 +20,10 @@ import type { NewToken } from "./token-discovery/domain/new-token.js";
 import { NEW_TOKEN_SOURCE } from "./token-discovery/token-discovery.module.js";
 import type { SmartWalletTracker } from "./wallet-reputation/application/smart-wallet-tracker.js";
 import { SMART_WALLET_TRACKER } from "./wallet-reputation/wallet-reputation.module.js";
+
+/** The API is used by a signed-in session (docs/API.md "Authentication"). */
+const session = createTestSession();
+const fetch = session.fetch;
 
 const MINT = "E3rpattxgipu5MoxktjsXHwEaYVfmowta9tnCp6bpump";
 
@@ -134,7 +139,8 @@ const boot = async (config: AppConfig) => {
   const tokens = new FakeFeed<NewToken>("tokens");
   const trades = new FakeFeed<Trade>("trades");
   const history = new FakeHistory();
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+  const moduleRef = await session
+    .signIn(Test.createTestingModule({ imports: [AppModule.forRoot(config)] }))
     .overrideProvider(NEW_TOKEN_SOURCE)
     .useValue(tokens)
     .overrideProvider(TRADE_SOURCE)

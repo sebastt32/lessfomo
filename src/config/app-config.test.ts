@@ -30,4 +30,15 @@ describe("loadAppConfig", () => {
     });
     expect(loadAppConfig({}, new Date()).walletReputation.rules).toBe(DEFAULT_REPUTATION_RULES);
   });
+
+  it("reads AUTH_COOKIE_SECURE (only \"true\") and AUTH_SESSION_DAYS (positive integer, 7 by default)", () => {
+    const auth = (env: Record<string, string>) => loadAppConfig(env, new Date()).auth;
+
+    expect(auth({})).toEqual({ cookieSecure: false, sessionDays: 7 });
+    expect(auth({ AUTH_COOKIE_SECURE: "true", AUTH_SESSION_DAYS: "30" })).toEqual({ cookieSecure: true, sessionDays: 30 });
+    for (const invalid of ["", "1", "yes", "TRUE", "false"]) expect(auth({ AUTH_COOKIE_SECURE: invalid }).cookieSecure).toBe(false);
+    for (const invalid of ["", "0", "-1", "1.5", "week", "1e2", "99999999999999999999"]) {
+      expect(auth({ AUTH_SESSION_DAYS: invalid }).sessionDays).toBe(7);
+    }
+  });
 });

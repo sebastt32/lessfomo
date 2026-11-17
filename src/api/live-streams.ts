@@ -1,10 +1,14 @@
 import { Inject, Injectable, type BeforeApplicationShutdown } from "@nestjs/common";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { AuthService } from "../auth/application/auth-service.js";
+import { AUTH_SERVICE } from "../auth/auth.tokens.js";
+import { sessionOf } from "../auth/http/request-session.js";
 import { APP_CONFIG, type AppConfig } from "../config/app-config.js";
 import type { LiveFeed } from "../live-feed/application/live-feed.js";
 import { LIVE_FEED } from "../live-feed/live-feed.module.js";
 import type { SolUsdPrice } from "../market-price/domain/sol-usd-price.js";
 import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
+import { ApiErrors } from "./http/api-error.js";
 import { TokenVisibility } from "./token-visibility.js";
 import { liveEventView, tradeView } from "./views.js";
 
@@ -19,21 +23,26 @@ const writeEvent = (response: ServerResponse, event: SseEvent): void => {
 
 /**
  * Server-Sent Events streams of docs/API.md, written straight to the response so every byte stays
- * as documented. Open streams are ended before the API closes.
+ * as documented. Open streams are ended before the API closes, and when their session ends
+ * (sign-out, password change, expiry).
  */
 @Injectable()
 export class LiveStreams implements BeforeApplicationShutdown {
-  /** Open SSE responses and the function that detaches each one from the feed. */
-  private readonly streams = new Map<ServerResponse, () => void>();
+  /** Open SSE responses: the function that detaches each one from the feed and the session it belongs to. */
+  private readonly streams = new Map<ServerResponse, { readonly cleanup: () => void; readonly tokenHash: string }>();
   private readonly heartbeatMs: number;
+  private readonly stopListening: () => void;
 
   constructor(
     @Inject(APP_CONFIG) config: AppConfig,
     @Inject(LIVE_FEED) private readonly feed: LiveFeed,
     @Inject(SOL_USD_PRICE) private readonly solPrice: SolUsdPrice,
     @Inject(TokenVisibility) private readonly visibility: TokenVisibility,
+    @Inject(AUTH_SERVICE) private readonly auth: AuthService,
   ) {
     this.heartbeatMs = config.api.heartbeatMs;
+    // Signing out or changing the password ends the streams of the deleted sessions at once.
+    this.stopListening = auth.onSessionRevoked((tokenHash) => this.closeSession(tokenHash));
   }
 
   /** `GET /api/stream`: the current source statuses, then every live event of public tokens. */
@@ -90,10 +99,18 @@ export class LiveStreams implements BeforeApplicationShutdown {
   }
 
   beforeApplicationShutdown(): void {
-    for (const [stream, cleanup] of [...this.streams]) {
-      cleanup();
-      stream.end();
-    }
+    this.stopListening();
+    for (const stream of [...this.streams.keys()]) this.close(stream);
+  }
+
+  /** Ends every stream opened with a session. */
+  private closeSession(tokenHash: string): void {
+    for (const [stream, entry] of [...this.streams]) if (entry.tokenHash === tokenHash) this.close(stream);
+  }
+
+  private close(stream: ServerResponse): void {
+    this.streams.get(stream)?.cleanup();
+    stream.end();
   }
 
   /**
@@ -106,6 +123,10 @@ export class LiveStreams implements BeforeApplicationShutdown {
     initial: readonly SseEvent[],
     attach: (send: (event: SseEvent) => void) => readonly (() => void)[],
   ): void {
+    // The guard authenticated the request; without its session nothing is streamed.
+    const session = sessionOf(request);
+    if (session === null) throw ApiErrors.unauthenticated();
+    const { tokenHash } = session;
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -113,18 +134,28 @@ export class LiveStreams implements BeforeApplicationShutdown {
     });
     response.write("retry: 5000\n\n");
     for (const event of initial) writeEvent(response, event);
-
     const detach = attach((event) => writeEvent(response, event));
+    let checking = false;
     const heartbeat = setInterval(() => {
       if (!response.writableEnded) response.write(": ping\n\n");
+      if (checking) return;
+      checking = true;
+      // A session that expired, or was deleted by another process, loses its streams here. A session
+      // that cannot be checked is treated the same (fail closed); the client reconnects through the guard.
+      this.auth
+        .isActive(tokenHash)
+        .catch(() => false)
+        .then((active) => {
+          checking = false;
+          if (!active && this.streams.has(response)) this.close(response);
+        });
     }, this.heartbeatMs);
-
     const cleanup = (): void => {
       clearInterval(heartbeat);
       for (const unsubscribe of detach) unsubscribe();
       this.streams.delete(response);
     };
-    this.streams.set(response, cleanup);
+    this.streams.set(response, { cleanup, tokenHash });
     request.on("close", cleanup);
     response.on("close", cleanup);
   }

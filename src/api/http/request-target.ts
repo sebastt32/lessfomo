@@ -19,3 +19,9 @@ export const normalizeRequestTarget = (request: IncomingMessage): void => {
 };
 
 export const hasInvalidRequestTarget = (request: IncomingMessage): boolean => invalidTargets.has(request);
+
+/** The path of a request, as normalized by `normalizeRequestTarget`, without its query. */
+export const requestPath = (request: IncomingMessage): string => (request.url ?? "/").split("?")[0] ?? "/";
+
+/** Whether the request is addressed to the authentication endpoints, the only ones that accept POST. */
+export const isAuthPath = (request: IncomingMessage): boolean => requestPath(request).startsWith("/api/auth/");

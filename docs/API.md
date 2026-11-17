@@ -27,7 +27,8 @@ nothing (the check runs before validation and before the public visibility rule)
 The session is a cookie named `lessfomo_session` (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` over
 HTTPS), valid for 7 days from the last request. Browsers on another origin (local development) must
 send credentials (`fetch` with `credentials: "include"`, `EventSource` with `withCredentials`); CORS
-answers allowed origins with `Access-Control-Allow-Credentials: true`.
+answers allowed origins with `Access-Control-Allow-Credentials: true`. Allowed origins also get
+`Access-Control-Expose-Headers: Retry-After`, so they can read it on `429 TOO_MANY_ATTEMPTS`.
 
 State-changing requests must send `Content-Type: application/json`; when an `Origin` header is
 present it must be the API's own origin or an allowed CORS origin, otherwise `403 FORBIDDEN_ORIGIN`.

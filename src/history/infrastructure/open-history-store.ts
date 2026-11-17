@@ -4,10 +4,13 @@ import type { HistoryRecorder } from "../domain/history-recorder.js";
 import type { TokenCatalogReader } from "../domain/token-catalog-reader.js";
 import { errorMessage } from "../../shared/error-message.js";
 import type { WalletReputationStore } from "../../wallet-reputation/domain/wallet-reputation-store.js";
+import type { SessionStore } from "../../auth/domain/session-store.js";
+import type { UserStore } from "../../auth/domain/user-store.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
-export interface History extends HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore {
+export interface History
+  extends HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore, UserStore, SessionStore {
   close(): Promise<void>;
 }
 

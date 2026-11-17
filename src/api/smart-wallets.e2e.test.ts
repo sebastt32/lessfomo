@@ -13,6 +13,7 @@ import type { Trade } from "../momentum/domain/trade.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
 import { ReputationCloser } from "../wallet-reputation/application/reputation-closer.js";
 import { DEFAULT_REPUTATION_RULES, type WalletRecord } from "../wallet-reputation/domain/reputation-rules.js";
+import { createTestSession } from "../auth/testing/signed-in.js";
 import { ApiModule } from "./api.module.js";
 import { API_ERROR_REPORTER } from "./http/api-exception.filter.js";
 import { API_APPLICATION_OPTIONS, createApiHttpAdapter } from "./http/api-http-adapter.js";
@@ -55,6 +56,10 @@ const trade = (mint: string, trader: string, side: "buy" | "sell", at: number, s
   timestamp: new Date(at),
 });
 
+/** Every request of this file is made by a signed-in session (docs/API.md "Authentication"). */
+const session = createTestSession();
+const fetch = session.fetch;
+
 let app: INestApplication | null = null;
 afterEach(async () => {
   await app?.close();
@@ -91,7 +96,8 @@ const start = async () => {
   const feed = new LiveFeed(1);
   // The old "one smart wallet" setting of these tests is now one conviction wallet (D7).
   const config = loadAppConfig({ PUBLIC_MIN_CONVICTION_WALLETS: "1" }, new Date(now));
-  const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] })
+  const moduleRef = await session
+    .signIn(Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] }))
     .overrideProvider(LIVE_FEED)
     .useValue(feed)
     .overrideProvider(HISTORY_STORE)

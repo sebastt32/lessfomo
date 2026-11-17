@@ -26,6 +26,7 @@ npm run dev
 | `npm run dev` | Run in watch mode with `tsx` |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run the compiled build |
+| `npm run create-superadmin` | Create the super admin on the compiled build (see [Authentication](#authentication)) |
 | `npm run typecheck` | Type-check without emitting |
 | `npm test` | Run tests with Vitest |
 
@@ -43,6 +44,8 @@ All variables are optional.
 | `API_HOST` | `127.0.0.1` | Interface the HTTP API binds to (local only by default) |
 | `API_PORT` | `3001` | HTTP API port |
 | `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated browser origins allowed to call the API |
+| `AUTH_COOKIE_SECURE` | _(unset)_ | `true` always marks the session cookie `Secure`; by default it follows `X-Forwarded-Proto` |
+| `AUTH_SESSION_DAYS` | `7` | Days a session lives after its last request (positive integer; invalid values use `7`) |
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
@@ -236,12 +239,15 @@ live streams.
 | `token_smart_wallets`, `smart_wallet_tokens` | Smart wallets of each token (tier and style at entry) and their counts (`conviction` included) |
 | `smart_wallet_outcomes` | Outcome of each closed token for the smart-wallet analysis |
 | `conviction_outcomes` | The same outcome counting conviction wallets only (`by=conviction`) |
+| `users` | Who may sign in: username (unique ignoring case), password hash and role |
+| `sessions` | Open sessions by the SHA-256 of their token, with their expiry |
 
 The smart-wallet tables are created on startup in older databases too, and filled by the backfill.
 Columns added later (`token_closures.version`, `wallet_token_results.first_sell_at`,
 `token_smart_wallets.style_at_entry`, `smart_wallet_tokens.conviction`, `wallet_reputation.style`,
 `flip_rate`, `median_hold_seconds`) are added on startup to these derived tables only; raw tables
 are never altered.
+`users` and `sessions` are created on startup in older databases too; no existing table changes.
 `token_state` and `token_snapshots` are created on startup in older databases too; the state
 of tokens stored before them is rebuilt from their screenings, momentum and trades.
 
@@ -259,7 +265,8 @@ WHERE s.score >= 60;
 
 While running, the screener exposes a read-only JSON + Server-Sent Events API on
 `http://127.0.0.1:3001` for dashboards such as
-[lessfomo-frontend](https://github.com/sebastt32/lessfomo-frontend).
+[lessfomo-frontend](https://github.com/sebastt32/lessfomo-frontend). Everything except
+`GET /api/health` requires signing in (see [Authentication](#authentication)).
 
 | Endpoint | Description |
 | --- | --- |
@@ -276,6 +283,7 @@ While running, the screener exposes a read-only JSON + Server-Sent Events API on
 | `GET /api/tokens/:mint/stream` | Live `trade` and `sol-price` events of one token |
 | `GET /api/stats` | Totals: tokens (active, dead, migrated), statuses, trades, snapshots |
 | `GET /api/stream` | Live `token`, `screening`, `momentum`, `status` and `smart-wallet` events |
+| `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/password` | Sign in, current user, sign out, change password |
 
 Candles are built on request from the stored `trades` table, so they cover every trade of a
 tracked token. The SOL/USD price (for market caps in USD) is polled every minute from free,
@@ -283,6 +291,58 @@ keyless public APIs: Jupiter, falling back to CoinGecko and then Binance. It is 
 none of them answers.
 
 The full contract is in [docs/API.md](docs/API.md).
+
+## Authentication
+
+The whole platform is behind one sign-in: every endpoint and both streams answer
+`401 UNAUTHENTICATED` without a session, except `GET /api/health`, `POST /api/auth/login` and
+`POST /api/auth/logout`. There is no public sign-up. The contract is in
+[docs/API.md](docs/API.md#authentication).
+
+### Create or reset the super admin
+
+Run the command where the app runs, with the same environment (`DATABASE_URL` or
+`LESSFOMO_DB_PATH`), so it writes to the same history store. It only opens that store: it does not
+start the screener, the API or any network source, and it can run next to the running app.
+
+```bash
+npm run build
+node dist/create-superadmin.js            # creates "superadmin"
+node dist/create-superadmin.js alice      # another username
+node dist/create-superadmin.js --reset    # new password for "superadmin", signed out everywhere
+
+docker exec -it <container> node dist/create-superadmin.js   # in the Docker image
+```
+
+It prints the username and a random 32-character password **once**; only the password's hash is
+stored, so save it then and change it after signing in. If the user already exists it exits with
+code 1 and changes nothing unless `--reset` is given. No credentials live in the environment or in git.
+
+### How it works
+
+| What | How |
+| --- | --- |
+| Passwords | `scrypt` (N=2^15, r=8, p=3) with a random salt per user, compared in constant time. An unknown username costs the same work as a wrong password. New passwords need 12+ characters |
+| Sessions | A random 32-byte token in the `lessfomo_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`); the database keeps only its SHA-256. Valid for `AUTH_SESSION_DAYS` after the last request (refreshed at most once a minute). Expired sessions are deleted hourly |
+| Sign-in limit | 5 failed attempts per username and client IP in 15 minutes, then `429` until the window ends. Kept in memory, so a restart forgets it. Wrong current passwords when changing the password count too |
+| Cross-site requests | The auth `POST`s need `Content-Type: application/json` and, when the browser sends `Origin`, an allowed CORS origin or the API's own host, otherwise `403 FORBIDDEN_ORIGIN` |
+| Ending a session | Signing out, changing the password (every other session of the user) and `--reset` (all of them) delete sessions; their open streams are closed, at the latest on the next heartbeat |
+| Failures | If a session cannot be checked the answer is `401`, never access |
+
+### Security notes
+
+- **Use HTTPS.** Over plain HTTP the password and the session cookie travel readable. The cookie is
+  marked `Secure` when the proxy sends `X-Forwarded-Proto: https`; set `AUTH_COOKIE_SECURE=true` to
+  force it once the site is only served over HTTPS.
+- **Keep the API behind the dashboard's reverse proxy** (do not publish its port). The client IP of
+  the sign-in limit is the first hop of `X-Forwarded-For`, which is only trustworthy when a proxy
+  sets it; reached directly, a client could send any value and dodge the per-IP limit (it would
+  still need the password). No other forwarded header is used for a security decision.
+- **Same-origin check.** A dashboard served from another origin than the one in `Host` must be listed
+  in `CORS_ORIGIN`. A reverse proxy in front of the API should forward the public host
+  (`proxy_set_header Host $host` in nginx); otherwise list the public origin in `CORS_ORIGIN`, or
+  browser sign-ins are answered `403 FORBIDDEN_ORIGIN`.
+- Passwords, tokens, cookies and hashes are never logged.
 
 ## Pipeline
 
@@ -312,7 +372,8 @@ because `tsx` and Vitest do not emit decorator metadata):
 | `LiveFeedModule` | `LIVE_FEED` |
 | `MarketPriceModule` | `SOL_PRICE_FEED`, `SOL_USD_PRICE` |
 | `ScreeningModule` | `ScreeningPipeline`, which wires the sources to the screener, history, snapshots and feed |
-| `ApiModule` | Controllers, CORS/method middleware, error filter and SSE streams of `docs/API.md` |
+| `AuthModule` | `AUTH_SERVICE`, `USER_STORE`, `SESSION_STORE`, `AUTH_CLOCK` and the `/api/auth/*` controller (sign-in for the whole platform) |
+| `ApiModule` | Controllers, CORS/session guard/method middleware, error filter and SSE streams of `docs/API.md` |
 
 `src/main.ts` reads the environment once (`src/config/app-config.ts`), starts the API and then
 the pipeline. If the API cannot start, the screener keeps running. On `SIGINT`/`SIGTERM` it stops
@@ -327,6 +388,9 @@ The `Dockerfile` builds a production image that runs `node dist/main.js` as the 
 docker build -t lessfomo .
 docker run -p 3001:3001 -e DATABASE_URL=postgres://user:password@host:5432/lessfomo lessfomo
 ```
+
+Create the super admin inside the running container with
+`docker exec -it <container> node dist/create-superadmin.js` (see [Authentication](#authentication)).
 
 Without `DATABASE_URL`, history goes to SQLite at `/data/lessfomo.db`; mount a volume on
 `/data` to keep it. Set `CORS_ORIGIN` to the dashboard origin when it calls the API directly.

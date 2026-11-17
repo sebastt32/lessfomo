@@ -20,10 +20,13 @@ import type {
   TokenClose,
   WalletReputationStore,
 } from "../../wallet-reputation/domain/wallet-reputation-store.js";
+import type { SessionStore } from "../../auth/domain/session-store.js";
+import type { Session } from "../../auth/domain/user.js";
+import type { NewUser, UserStore } from "../../auth/domain/user-store.js";
 import { PostgresHistory } from "./postgres/postgres-history.js";
 import { SqliteHistoryRecorder } from "./sqlite/sqlite-history-recorder.js";
 
-type History = HistoryRecorder & HistoryReader & SnapshotStore & TokenCatalogReader & WalletReputationStore;
+type History = HistoryRecorder & HistoryReader & SnapshotStore & TokenCatalogReader & WalletReputationStore & UserStore & SessionStore;
 
 interface OpenedHistory {
   readonly history: History;
@@ -1334,6 +1337,149 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
     });
   });
 
+  describe("users and sessions", () => {
+    const AT = new Date("2026-11-17T10:00:00.000Z");
+    const LATER = new Date("2026-11-17T11:00:00.000Z");
+    const DAY = 24 * 60 * 60_000;
+    const newUser = (id: string, username: string): NewUser => ({
+      id,
+      username,
+      passwordHash: `scrypt$hash-of-${id}`,
+      role: "superadmin",
+      createdAt: AT,
+    });
+    const session = (tokenHash: string, userId: string, expiresAt = new Date(AT.getTime() + 7 * DAY)): Session => ({
+      tokenHash,
+      userId,
+      createdAt: AT,
+      lastSeenAt: AT,
+      expiresAt,
+    });
+
+    it("creates a user once per username, case-insensitively, and finds it by any case or by id", async () => {
+      const history = await open();
+
+      expect(await history.createUser(newUser("u1", "SuperAdmin"))).toBe(true);
+      expect(await history.createUser(newUser("u2", "superadmin"))).toBe(false);
+      expect(await history.createUser(newUser("u3", "SUPERADMIN"))).toBe(false);
+      expect(await history.createUser(newUser("u4", "other"))).toBe(true);
+
+      const stored = {
+        id: "u1",
+        username: "SuperAdmin",
+        passwordHash: "scrypt$hash-of-u1",
+        role: "superadmin",
+        createdAt: AT,
+        updatedAt: AT,
+      };
+      expect(await history.findUserByUsername("superadmin")).toEqual(stored);
+      expect(await history.findUserByUsername("SUPERADMIN")).toEqual(stored);
+      expect(await history.findUserById("u1")).toEqual(stored);
+      expect(await history.findUserByUsername("nobody")).toBeNull();
+      expect(await history.findUserByUsername("super%")).toBeNull();
+      expect(await history.findUserById("u2")).toBeNull();
+      expect(await countOf("users")).toBe(2);
+    });
+
+    it("replaces a password hash and its update time, for that user only", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createUser(newUser("u2", "other"));
+
+      await history.setPasswordHash("u1", "scrypt$new", LATER);
+
+      expect(await history.findUserById("u1")).toMatchObject({ passwordHash: "scrypt$new", createdAt: AT, updatedAt: LATER });
+      expect(await history.findUserById("u2")).toMatchObject({ passwordHash: "scrypt$hash-of-u2", updatedAt: AT });
+    });
+
+    it("stores a session by token hash with its user, and slides its expiry", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "SuperAdmin"));
+      await history.createSession(session("hash-a", "u1"));
+
+      expect(await history.findSession("hash-a")).toEqual({
+        ...session("hash-a", "u1"),
+        user: { id: "u1", username: "SuperAdmin", role: "superadmin" },
+      });
+      expect(await history.findSession("hash-b")).toBeNull();
+
+      const expiresAt = new Date(LATER.getTime() + 7 * DAY);
+      await history.touchSession("hash-a", LATER, expiresAt);
+      await history.touchSession("hash-b", LATER, expiresAt);
+
+      expect(await history.findSession("hash-a")).toMatchObject({ createdAt: AT, lastSeenAt: LATER, expiresAt });
+      expect(await countOf("sessions")).toBe(1);
+    });
+
+    it("rejects a second session with the same token hash", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createSession(session("hash-a", "u1"));
+
+      await expect(history.createSession(session("hash-a", "u1"))).rejects.toThrow();
+    });
+
+    it("deletes one session, or every session of a user except one, returning the deleted hashes", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      await history.createUser(newUser("u2", "other"));
+      for (const hash of ["a", "b", "c", "d"]) await history.createSession(session(hash, "u1"));
+      await history.createSession(session("x", "u2"));
+
+      await history.deleteSession("a");
+      await history.deleteSession("missing");
+      expect(await history.findSession("a")).toBeNull();
+
+      expect((await history.deleteUserSessions("u1", "c")).sort()).toEqual(["b", "d"]);
+      expect(await history.findSession("c")).not.toBeNull();
+      expect(await history.findSession("x")).not.toBeNull();
+      expect(await history.deleteUserSessions("u1", null)).toEqual(["c"]);
+      expect(await history.deleteUserSessions("u1", null)).toEqual([]);
+      expect(await countOf("sessions")).toBe(1);
+    });
+
+    it("purges expired sessions oldest first, a bounded number per call", async () => {
+      const history = await open();
+      await history.createUser(newUser("u1", "superadmin"));
+      const at = (minutes: number) => new Date(AT.getTime() + minutes * 60_000);
+      await history.createSession(session("old-1", "u1", at(1)));
+      await history.createSession(session("old-2", "u1", at(2)));
+      await history.createSession(session("old-3", "u1", at(3)));
+      await history.createSession(session("edge", "u1", at(10)));
+      await history.createSession(session("live", "u1", at(11)));
+
+      expect(await history.deleteExpiredSessions(at(10), 2)).toBe(2);
+      expect(await history.findSession("old-1")).toBeNull();
+      expect(await history.findSession("old-2")).toBeNull();
+      expect(await history.findSession("old-3")).not.toBeNull();
+      expect(await history.deleteExpiredSessions(at(10), 10)).toBe(2);
+      expect(await history.deleteExpiredSessions(at(10), 10)).toBe(0);
+
+      expect(await history.findSession("edge")).toBeNull();
+      expect(await history.findSession("live")).not.toBeNull();
+    });
+
+    it("adds the tables to an existing database without touching its data, and keeps users across restarts", async () => {
+      const history = await open();
+      await history.recordToken(token("a"));
+      await history.recordTrade(trade);
+      await history.recordScreening(failed("a"), AT);
+      await execOnLast("DROP TABLE sessions; DROP TABLE users");
+
+      const migrated = await reopenLast();
+      expect(await migrated.findUserByUsername("superadmin")).toBeNull();
+      await migrated.createUser(newUser("u1", "superadmin"));
+      await migrated.createSession(session("hash-a", "u1"));
+      const again = await reopenLast();
+
+      expect(await again.findUserByUsername("superadmin")).toMatchObject({ id: "u1" });
+      expect(await again.findSession("hash-a")).not.toBeNull();
+      expect(await again.createUser(newUser("u2", "SUPERADMIN"))).toBe(false);
+      expect(await countOf("tokens")).toBe(1);
+      expect(await countOf("trades")).toBe(1);
+      expect(await countOf("screenings")).toBe(1);
+    });
+  });
 });
 
 describe("PostgresHistory", () => {
