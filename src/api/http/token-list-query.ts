@@ -1,6 +1,7 @@
 import type {
   Lifecycle,
   SafetyStatus,
+  TokenDateField,
   TokenListQuery,
   TokenSortField,
 } from "../../history/domain/token-catalog-reader.js";
@@ -97,7 +98,14 @@ const parseAppearedLate = (raw: string | null): boolean | null => {
   return raw === "true";
 };
 
-const parsePositiveInteger = (name: string, raw: string | null, fallback: number): number => {
+/** `dateField`: `detectedAt` (the default) or `appearedAt`. */
+const parseDateField = (raw: string | null): TokenDateField | null => {
+  if (raw === null) return null;
+  if (raw !== "detectedAt" && raw !== "appearedAt") throw ApiErrors.invalidQuery("dateField", "detectedAt or appearedAt");
+  return raw;
+};
+
+const parsePositiveInteger =(name: string, raw: string | null, fallback: number): number => {
   if (raw === null) return fallback;
   if (!INTEGER.test(raw)) throw ApiErrors.invalidQuery(name, "a positive integer");
   return Number(raw);
@@ -132,9 +140,11 @@ export const parseTokenListQuery = (params: URLSearchParams, now: Date, publicMi
   const pageSize = parsePositiveInteger("pageSize", params.get("pageSize"), DEFAULT_PAGE_SIZE);
   const phases = parsePhases(params.get("phase"));
   const appearedLate = parseAppearedLate(params.get("appearedLate"));
+  const dateField = parseDateField(params.get("dateField"));
   return {
     from: parseInstant("from", params.get("from")),
     to: parseInstant("to", params.get("to")),
+    ...(dateField !== null && { dateField }),
     statuses: parseStatuses(params.get("status")),
     lifecycle: parseLifecycle(params.get("lifecycle")),
     minScore: parseMinScore(params.get("minScore")),

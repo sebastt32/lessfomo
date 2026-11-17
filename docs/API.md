@@ -404,7 +404,11 @@ Details of the rules:
 
 `Mover`, `TokenListItem` and `ScreeningView` gain `cycle: TokenCycle | null`, and `GET /api/tokens/:mint` gains a
 top-level `cycle`. `GET /api/tokens` accepts `phase` (comma-separated `stable`, `exploding`, `crashed`),
-`appearedLate` (`true`/`false`) and the sort fields `appearedAt` and `investWindow`. Candles accept
+`appearedLate` (`true`/`false`), the sort fields `appearedAt` and `investWindow`, and
+`dateField` (`detectedAt`, the default, or `appearedAt`): with `appearedAt`, `from`/`to` filter on the
+cycle's `appearedAt` instead of the creation time, and tokens without a cycle never match a range
+(e.g. the tokens that appeared on one local day: `from=<midnight>&to=<next midnight>&dateField=appearedAt`).
+Any other `dateField` → `400 INVALID_QUERY`. Candles accept
 the intervals `15m` and `1h` too, and `limit` is clamped to `1..2000`.
 
 | Event | Stream | `data` | When |

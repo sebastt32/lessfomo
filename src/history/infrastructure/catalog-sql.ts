@@ -424,8 +424,9 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
       return lifecycleSql(lifecyclePlaceholder);
     };
     const where: string[] = [];
-    if (query.from !== null) where.push(`t.detected_at >= ${params.add(query.from.getTime())}`);
-    if (query.to !== null) where.push(`t.detected_at < ${params.add(query.to.getTime())}`);
+    const dateColumn = query.dateField === "appearedAt" ? "c.appeared_at" : "t.detected_at";
+    if (query.from !== null) where.push(`${dateColumn} >= ${params.add(query.from.getTime())}`);
+    if (query.to !== null) where.push(`${dateColumn} < ${params.add(query.to.getTime())}`);
     if (query.statuses.length > 0) {
       where.push(`COALESCE(s.status, 'pending') IN (${query.statuses.map((status) => params.add(status)).join(", ")})`);
     }

@@ -283,6 +283,21 @@ describe("token cycle API", () => {
     expect(await mints("sort=investWindow:asc")).toEqual([LATE, CRASHED, FRESH]);
   });
 
+  it("filters from/to on the appearance time with dateField=appearedAt, and on the creation time by default", async () => {
+    const { mints, history } = await start();
+    await history.createCycle(FRESH, at(500), UPDATED_AT);
+    const range = (fromSeconds: number, toSeconds: number) =>
+      `from=${encodeURIComponent(iso(fromSeconds))}&to=${encodeURIComponent(iso(toSeconds))}`;
+
+    // CRASHED and LATE appeared at 100 s, FRESH at 500 s; all were created at 0 s or just before.
+    expect(await mints(`${range(400, 600)}&dateField=appearedAt`)).toEqual([FRESH]);
+    expect(await mints(`${range(100, 101)}&dateField=appearedAt&sort=appearedAt:asc`)).toEqual([CRASHED, LATE]);
+    expect(await mints(`${range(0, 100)}&dateField=appearedAt`)).toEqual([]);
+    expect(await mints(`${range(400, 600)}&dateField=detectedAt`)).toEqual([]);
+    expect(await mints(range(400, 600))).toEqual([]);
+    expect(await mints(range(-10, 1))).toEqual([CRASHED, LATE, FRESH]);
+  });
+
   it("answers 400 INVALID_QUERY for a bad phase, lateness or sort", async () => {
     const { get } = await start();
 
@@ -296,6 +311,8 @@ describe("token cycle API", () => {
       ["sort=investWindow:up", "sort"],
       ["sort=appearedAt:asc:desc", "sort"],
       ["sort=window", "sort"],
+      ["dateField=createdAt", "dateField"],
+      ["dateField=", "dateField"],
     ] as const) {
       const { status, body } = await get(`/api/tokens?${query}`);
       expect([query, status, body.error.code]).toEqual([query, 400, "INVALID_QUERY"]);

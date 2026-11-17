@@ -16,11 +16,16 @@ export type TokenSortField =
   | "appearedAt"
   | "investWindow";
 
+/** The time `from`/`to` filter on: the token's creation, or when it appeared in lessfomo (its cycle). */
+export type TokenDateField = "detectedAt" | "appearedAt";
+
 export interface TokenListQuery {
   /** Inclusive. */
   readonly from: Date | null;
   /** Exclusive. */
   readonly to: Date | null;
+  /** What `from`/`to` apply to; `detectedAt` when absent. With `appearedAt`, tokens without a cycle never match a range. */
+  readonly dateField?: TokenDateField;
   /** Empty means every status. */
   readonly statuses: readonly SafetyStatus[];
   readonly lifecycle: Lifecycle | null;
