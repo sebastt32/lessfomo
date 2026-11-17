@@ -53,15 +53,60 @@ import {
   type CatalogDialect,
   type Statement,
 } from "../catalog-sql.js";
+import type { ReputationStats } from "../../../wallet-reputation/domain/closed-result.js";
+import type { WalletRecord } from "../../../wallet-reputation/domain/reputation-rules.js";
+import type { ObservedTrade } from "../../../wallet-reputation/domain/wallet-positions.js";
+import type {
+  ClosableToken,
+  SmartWalletEntry,
+  StoredOutcome,
+  StoredWalletResult,
+  TokenClose,
+  WalletBuy,
+  WalletReputationStore,
+  SmartWalletsSummary,
+} from "../../../wallet-reputation/domain/wallet-reputation-store.js";
+import { NO_SMART_WALLETS } from "../../../wallet-reputation/domain/wallet-reputation-store.js";
+import {
+  chunked,
+  closableTokensStatement,
+  firstScreeningSql,
+  hasWalletResultsSql,
+  newestFirstBuy,
+  saveSmartWalletStatements,
+  saveTokenCloseStatements,
+  saveWalletRecordsStatements,
+  smartWalletOutcomesStatement,
+  smartWalletRecordsStatement,
+  staleWalletsStatement,
+  statsAtBuysStatement,
+  toClosableToken,
+  toFirstScreeningAt,
+  tokenSmartSummarySql,
+  tokenSmartWalletsSql,
+  mintsWithSmartWalletsStatement,
+  tokenTradesSql,
+  toObservedTrade,
+  toSmartWalletEntry,
+  toStatsEntry,
+  toStoredOutcome,
+  toStoredWalletResult,
+  toWalletRecord,
+  walletReputationDdl,
+  walletResultsStatement,
+  WALLETS_PER_QUERY,
+} from "../wallet-reputation-sql.js";
 import {
   candlesSql,
   devTradesSql,
   momentumValues,
+  recentScreeningsSql,
   SCREENING_COLUMNS,
   SCREENINGS_WITH_TOKEN,
   screeningValues,
   toMomentumPoint,
   toScreening,
+  toSmartWalletsSummary,
   toToken,
   tokenValues,
   toCandle,
@@ -133,6 +178,7 @@ CREATE TABLE IF NOT EXISTS momentum_snapshots (
 CREATE INDEX IF NOT EXISTS momentum_at ON momentum_snapshots (at);
 ${tokenStateDdl({ real: "REAL", time: "INTEGER" })}
 ${tokenSnapshotsDdl({ id: "INTEGER PRIMARY KEY AUTOINCREMENT", real: "REAL", time: "INTEGER" })}
+${walletReputationDdl({ real: "REAL", time: "INTEGER" })}
 `;
 
 const CHART_DIALECT: ChartDialect = { param: (index) => `?${index}`, sequence: "rowid" };
@@ -140,7 +186,9 @@ const CHART_DIALECT: ChartDialect = { param: (index) => `?${index}`, sequence: "
 const CATALOG_DIALECT: CatalogDialect = { ...CHART_DIALECT, typed: (index) => `?${index}` };
 
 /** Stores and reads history in a local SQLite file using Node's built-in driver (no dependencies). */
-export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader {
+export class SqliteHistoryRecorder
+  implements HistoryRecorder, HistoryReader, SnapshotStore, TokenCatalogReader, WalletReputationStore
+{
   private readonly db: DatabaseSync;
   private readonly insertToken: StatementSync;
   private readonly insertScreening: StatementSync;
@@ -193,10 +241,9 @@ export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader, Sn
     });
   }
 
-  async recentScreenings(limit: number): Promise<StoredScreening[]> {
-    return this.query(`${SCREENINGS_WITH_TOKEN} ORDER BY s.evaluated_at DESC, s.id DESC LIMIT ?`, limit).map(
-      toScreening,
-    );
+  async recentScreenings(limit: number, minSmartWallets = 0): Promise<StoredScreening[]> {
+    const params = minSmartWallets > 0 ? [limit, minSmartWallets] : [limit];
+    return this.query(recentScreeningsSql(CHART_DIALECT, minSmartWallets), ...params).map(toScreening);
   }
 
   async tokenHistory(mint: string): Promise<TokenHistory | null> {
@@ -270,6 +317,79 @@ export class SqliteHistoryRecorder implements HistoryRecorder, HistoryReader, Sn
     this.transaction(() =>
       snapshotHoldersStatements(CATALOG_DIALECT, mint, milestone, at, holders).forEach((statement) => this.run(statement)),
     );
+  }
+
+  async closableTokens(from: Date | null, upTo: Date, limit: number): Promise<ClosableToken[]> {
+    return this.rows(closableTokensStatement(CATALOG_DIALECT, from, upTo, limit)).map(toClosableToken);
+  }
+
+  async tokenTrades(mint: string): Promise<ObservedTrade[]> {
+    return this.query(tokenTradesSql(CHART_DIALECT), mint).map(toObservedTrade);
+  }
+
+  async firstScreeningAt(mint: string): Promise<Date | null> {
+    return toFirstScreeningAt(this.query(firstScreeningSql(CHART_DIALECT), mint)[0]);
+  }
+
+  async statsAtBuys(buys: readonly WalletBuy[], lookbackMs: number, excludedMint: string): Promise<Map<string, ReputationStats>> {
+    const stats = new Map<string, ReputationStats>();
+    for (const chunk of chunked(buys, WALLETS_PER_QUERY)) {
+      for (const row of this.rows(statsAtBuysStatement(CATALOG_DIALECT, chunk, lookbackMs, excludedMint))) {
+        stats.set(...toStatsEntry(row));
+      }
+    }
+    return stats;
+  }
+
+  async saveTokenClose(close: TokenClose): Promise<void> {
+    this.transaction(() => saveTokenCloseStatements(CATALOG_DIALECT, close).forEach((statement) => this.run(statement)));
+  }
+
+  async walletResults(wallets: readonly string[], since: Date): Promise<StoredWalletResult[]> {
+    return chunked(wallets, WALLETS_PER_QUERY)
+      .flatMap((chunk) => this.rows(walletResultsStatement(CATALOG_DIALECT, chunk, since)).map(toStoredWalletResult))
+      .sort(newestFirstBuy);
+  }
+
+  async hasWalletResults(wallet: string): Promise<boolean> {
+    return this.query(hasWalletResultsSql(CHART_DIALECT), wallet).length > 0;
+  }
+
+  async saveWalletRecords(records: readonly WalletRecord[]): Promise<void> {
+    this.transaction(() => saveWalletRecordsStatements(CATALOG_DIALECT, records).forEach((statement) => this.run(statement)));
+  }
+
+  async staleWallets(updatedBefore: Date, limit: number): Promise<string[]> {
+    return this.rows(staleWalletsStatement(CATALOG_DIALECT, updatedBefore, limit)).map((row) => String(row["wallet"]));
+  }
+
+  async smartWalletRecords(limit: number): Promise<WalletRecord[]> {
+    return this.rows(smartWalletRecordsStatement(CATALOG_DIALECT, limit)).map(toWalletRecord);
+  }
+
+  async saveSmartWallet(mint: string, entry: SmartWalletEntry): Promise<void> {
+    this.transaction(() => saveSmartWalletStatements(CATALOG_DIALECT, mint, entry).forEach((statement) => this.run(statement)));
+  }
+
+  async tokenSmartWallets(mint: string): Promise<SmartWalletEntry[]> {
+    return this.query(tokenSmartWalletsSql(CHART_DIALECT), mint).map(toSmartWalletEntry);
+  }
+
+  async tokenSmartSummary(mint: string): Promise<SmartWalletsSummary> {
+    const row = (this.query(tokenSmartSummarySql(CHART_DIALECT), mint))[0];
+    return row === undefined ? NO_SMART_WALLETS : toSmartWalletsSummary(row);
+  }
+
+  async mintsWithSmartWallets(mints: readonly string[], minSmartWallets: number): Promise<Set<string>> {
+    const found = new Set<string>();
+    for (const chunk of chunked(mints, WALLETS_PER_QUERY)) {
+      for (const row of this.rows(mintsWithSmartWalletsStatement(CATALOG_DIALECT, chunk, minSmartWallets))) found.add(String(row["mint"]));
+    }
+    return found;
+  }
+
+  async smartWalletOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
+    return this.rows(smartWalletOutcomesStatement(CATALOG_DIALECT, from, to)).map(toStoredOutcome);
   }
 
   /** Runs a query and returns plain rows; intended for analysis scripts and tests. */

@@ -1,3 +1,5 @@
+import { DEFAULT_REPUTATION_RULES, type ReputationRules } from "../wallet-reputation/domain/reputation-rules.js";
+
 /** Everything the process reads from its environment, read once at startup. */
 export interface AppConfig {
   readonly startedAt: Date;
@@ -35,6 +37,16 @@ export interface AppConfig {
     readonly dexMinIntervalMs: number;
     /** Minimum time between two RugCheck reads for survivors, on top of the screener's own. */
     readonly holderMinIntervalMs: number;
+  };
+  readonly walletReputation: {
+    /** Tier thresholds, lookback and bot flag (decision D1). */
+    readonly rules: ReputationRules;
+    /** Wait after a token's live window before closing its results, so its last trades are stored. */
+    readonly closeGraceMs: number;
+    /** Most tokens closed per tick (backfill included). */
+    readonly batchSize: number;
+    /** Wait after startup before the first close or backfill tick. */
+    readonly startDelayMs: number;
   };
 }
 
@@ -81,5 +93,11 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
     tickIntervalMs: 5_000,
     dexMinIntervalMs: 1_000,
     holderMinIntervalMs: 15_000,
+  },
+  walletReputation: {
+    rules: DEFAULT_REPUTATION_RULES,
+    closeGraceMs: 30_000,
+    batchSize: 25,
+    startDelayMs: 5_000,
   },
 });

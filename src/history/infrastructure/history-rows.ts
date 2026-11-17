@@ -2,6 +2,7 @@ import type { MomentumSnapshot } from "../../momentum/application/momentum-track
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { ScreeningResult } from "../../screening/token-screener.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
+import type { SmartWalletsSummary } from "../../wallet-reputation/domain/wallet-reputation-store.js";
 import type {
   StoredCandle,
   StoredDevTrade,
@@ -38,6 +39,7 @@ export const toScreening = (row: Row): StoredScreening => ({
   totalHolders: numberOrNull(row["total_holders"]),
   evaluatedAt: toDate(row["evaluated_at"]),
   detectedAt: toDateOrNull(row["token_detected_at"]),
+  smartWallets: toSmartWalletsSummary(row),
 });
 
 export const toToken = (row: Row): StoredToken => ({
@@ -138,8 +140,29 @@ export const momentumValues = (snapshot: MomentumSnapshot): SqlValue[] => {
   ];
 };
 
+/** Summary columns joined into token lists (alias `w`). */
+export const SMART_SUMMARY_COLUMNS =
+  "COALESCE(w.wallets, 0) AS sw_count, COALESCE(w.elite, 0) AS sw_elite, COALESCE(w.holding, 0) AS sw_holding";
+
+export const toSmartWalletsSummary = (row: Row): SmartWalletsSummary => ({
+  count: Number(row["sw_count"] ?? 0),
+  elite: Number(row["sw_elite"] ?? 0),
+  holding: Number(row["sw_holding"] ?? 0),
+});
+
+/** Screenings with their token's name, creation time and smart wallets (aliases `s`, `t`, `w`). */
 export const SCREENINGS_WITH_TOKEN = `
-  SELECT s.*, t.symbol, t.name, t.detected_at AS token_detected_at FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint`;
+  SELECT s.*, t.symbol, t.name, t.detected_at AS token_detected_at, ${SMART_SUMMARY_COLUMNS}
+  FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint LEFT JOIN smart_wallet_tokens w ON w.mint = s.mint`;
+
+/**
+ * Newest screenings first, insertion order breaking ties; parameter 1 = limit, 2 = minimum smart
+ * wallets (only used when above 0, so the default query is unchanged).
+ */
+export const recentScreeningsSql = ({ param }: ChartDialect, minSmartWallets: number): string =>
+  `${SCREENINGS_WITH_TOKEN}${
+    minSmartWallets > 0 ? ` WHERE w.wallets >= ${param(2)}` : ""
+  } ORDER BY s.evaluated_at DESC, s.id DESC LIMIT ${param(1)}`;
 
 /**
  * Placeholder for the n-th (1-based) query parameter: `?n` in SQLite, `$n` in PostgreSQL.

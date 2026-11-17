@@ -11,6 +11,7 @@ const MAX_PAGE_SIZE = 200;
 const MAX_SEARCH_LENGTH = 100;
 const STATUSES: readonly SafetyStatus[] = ["passed", "failed", "unverified", "pending"];
 const LIFECYCLES: readonly Lifecycle[] = ["active", "dead"];
+/** Listed in the error message; `smartWallets` (descending only) is accepted too, the message stays as it was. */
 const SORT_FIELDS: readonly TokenSortField[] = ["detectedAt", "maxScore", "peakMarketCapSol", "liquidity"];
 /** A date (UTC midnight) or a date-time with an explicit offset. */
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/;
@@ -19,7 +20,7 @@ const INTEGER = /^\d+$/;
 const isOneOf = <T extends string>(values: readonly T[], value: string): value is T =>
   (values as readonly string[]).includes(value);
 
-const parseInstant = (name: string, raw: string | null): Date | null => {
+export const parseInstant = (name: string, raw: string | null): Date | null => {
   if (raw === null) return null;
   const match = ISO_DATE.exec(raw);
   const date = match === null ? null : new Date(match[4] === undefined ? `${raw}T00:00:00.000Z` : raw);
@@ -63,6 +64,7 @@ const parseSearch = (raw: string | null): string | null => {
 
 const parseSort = (raw: string | null): TokenListQuery["sort"] => {
   if (raw === null) return { field: "detectedAt", direction: "desc" };
+  if (raw === "smartWallets" || raw === "smartWallets:desc") return { field: "smartWallets", direction: "desc" };
   const [field = "", direction = "desc", ...rest] = raw.split(":");
   if (!isOneOf(SORT_FIELDS, field) || (direction !== "asc" && direction !== "desc") || rest.length > 0) {
     throw ApiErrors.invalidQuery("sort", `one of ${SORT_FIELDS.join(", ")} with :asc or :desc`);
@@ -76,6 +78,20 @@ const parsePositiveInteger = (name: string, raw: string | null, fallback: number
   return Number(raw);
 };
 
+/** Only tokens bought by a good-or-elite wallet are public, so fewer than 1 means 1. */
+const MIN_PUBLIC_SMART_WALLETS = 1;
+
+/**
+ * `minSmartWallets`: a non-negative integer (default 1); values below 1 are treated as 1 because of
+ * the public visibility rule. Anything else is 400 INVALID_QUERY.
+ */
+export const parseMinSmartWallets = (raw: string | null): number => {
+  if (raw === null) return MIN_PUBLIC_SMART_WALLETS;
+  const value = INTEGER.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(value)) throw ApiErrors.invalidQuery("minSmartWallets", "an integer of at least 1");
+  return Math.max(MIN_PUBLIC_SMART_WALLETS, value);
+};
+
 /** Reads `GET /api/tokens` parameters (first value of each), or throws 400 INVALID_QUERY naming the bad one. */
 export const parseTokenListQuery = (params: URLSearchParams, now: Date): TokenListQuery => {
   const page = parsePositiveInteger("page", params.get("page"), 1);
@@ -87,6 +103,7 @@ export const parseTokenListQuery = (params: URLSearchParams, now: Date): TokenLi
     statuses: parseStatuses(params.get("status")),
     lifecycle: parseLifecycle(params.get("lifecycle")),
     minScore: parseMinScore(params.get("minScore")),
+    minSmartWallets: parseMinSmartWallets(params.get("minSmartWallets")),
     search: parseSearch(params.get("q")),
     sort: parseSort(params.get("sort")),
     page,

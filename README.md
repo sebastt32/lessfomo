@@ -130,6 +130,62 @@ The schedule is stored with each token, so a restart resumes it: milestones miss
 process was down are collapsed into the latest one, taken late with its real time. Each tick
 (every 5 seconds) handles at most 100 due tokens and 60 DexScreener quotes.
 
+## Smart wallets
+
+Every wallet is rated by its own trading history, so the platform can show only tokens bought by
+wallets with a good record.
+
+**Result per wallet and token.** When a token's live tracking window (`TRACKING_WINDOW_MS`, counted
+from its creation) ends, each wallet that bought it gets a result from the stored trades: SOL from
+its sells, plus the tokens it still holds valued at the last observed price, minus the SOL it spent.
+Only trades from its first buy on count; the token's creator never gets a result for its own token.
+
+**Tiers** (from the results closed in the 7 days before a moment; a win is a positive result):
+
+| Tier | Closed tokens | Win rate | Net PnL |
+| --- | --- | --- | --- |
+| `elite` | ≥ 10 | ≥ 65% | ≥ 5 SOL |
+| `good` | ≥ 5 | ≥ 55% | > 0 SOL |
+| `none` | otherwise | | |
+
+`isBot` flags a wallet that first-buys 20 or more distinct tokens per active hour on average. It is
+shown, not used to rate. The thresholds live in `walletReputation.rules` of `src/config/app-config.ts`.
+
+**Point in time, no look-ahead.** A wallet's tier when it buys a token comes only from results that
+closed strictly before that buy (and within the 7 days before it). Tokens close oldest first, so
+every result that can rate a buy is stored before that buy is rated. The tier a wallet had at its
+first buy of a token is fixed for that token. Filters, counts and the analysis all use these tiers;
+`GET /api/wallets/:address` shows the current record (last 7 days before now).
+
+**Live.** Good and elite wallets are kept in memory. On every stored trade of a tracked token, a
+good or elite wallet's first buy (never the creator's) is counted in the token's
+`smartWallets { count, elite, holding }`; `holding` drops when its observed balance reaches zero.
+Changes are stored per token and pushed as `smart-wallet` events on `/api/stream`. When the token
+closes, its smart wallets are recomputed with the exact point-in-time tiers.
+
+**Public visibility.** The public API only exposes tokens bought by at least one good-or-elite
+wallet (tier at entry). Lists (`/api/tokens`, `/api/screenings`, `/api/movers`) leave the others
+out (`minSmartWallets` defaults to 1, lower values count as 1); their detail, candles, snapshots
+and smart wallets answer `404 TOKEN_NOT_FOUND` as if they did not exist; `/api/stream` skips their
+events and announces a token (`token`, then its latest `screening`) the moment its first good
+wallet buys; `/api/tokens/:mint/stream` sends nothing until then. `/api/wallets/:address` lists only
+results in public tokens, although the record rates all of them. `/api/stats` and
+`/api/analysis/smart-wallets` stay aggregates over every stored token, and every internal process
+(reputation, snapshots, analysis) keeps using all the data; nothing is deleted.
+
+**Close job and backfill.** Every tick (30 seconds, sooner while there is a backlog) the job closes
+up to 25 tokens whose window ended 30 seconds ago, then refreshes the records of the affected
+wallets (and, when idle, of records older than an hour, so results leaving the 7 days count). On
+startup the same loop backfills every stored token in bounded batches, logging its progress; it is
+idempotent and resumes after a restart. It only writes its own tables.
+
+**Analysis.** For each closed token, the job also stores what copying its smart wallets would have
+returned: entry at the price right after the k-th smart wallet's first buy (k = number of smart
+wallets, capped at 5; with none, the last price at the first safety check), exit at 2× or at the
+last price 10 minutes later, minus a 3% round-trip cost. `GET /api/analysis/smart-wallets` groups
+those outcomes in buckets `0` … `5+` (statistics are `null` for an empty bucket; `reached2xPct` is
+within the 10 minutes, `medianPeakX` over the rest of the live window).
+
 ## History
 
 Everything is stored in PostgreSQL when `DATABASE_URL` is set, otherwise in a local
@@ -146,7 +202,13 @@ live streams.
 | `momentum_snapshots` | Score, components and metrics per token per minute (active tokens only) |
 | `token_state` | Latest state of each token (status, liquidity, prices, max score, holders, last trade) and its snapshot schedule |
 | `token_snapshots` | Every snapshot of [Snapshots](#snapshots) |
+| `token_closures` | Tokens whose wallet results are closed |
+| `wallet_token_results` | Result of every wallet in every closed token |
+| `wallet_reputation` | Latest record of every wallet with results |
+| `token_smart_wallets`, `smart_wallet_tokens` | Smart wallets of each token (tier at entry) and their counts |
+| `smart_wallet_outcomes` | Outcome of each closed token for the smart-wallet analysis |
 
+The smart-wallet tables are created on startup in older databases too, and filled by the backfill.
 `token_state` and `token_snapshots` are created on startup in older databases too; the state
 of tokens stored before them is rebuilt from their screenings, momentum and trades.
 
@@ -169,15 +231,18 @@ While running, the screener exposes a read-only JSON + Server-Sent Events API on
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/health` | Status and data source health |
-| `GET /api/movers` | Latest momentum ranking |
-| `GET /api/screenings` | Recent safety check results |
-| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score and text filters |
-| `GET /api/tokens/:mint` | Full history of one token |
+| `GET /api/movers` | Latest momentum ranking (`minSmartWallets` filter) |
+| `GET /api/screenings` | Recent safety check results (`minSmartWallets` filter) |
+| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score, text and `minSmartWallets` filters, `sort=smartWallets:desc` |
+| `GET /api/tokens/:mint/smart-wallets` | Smart wallets of a token, with the record that makes each one good |
+| `GET /api/wallets/:address` | A wallet's current record and its results of the last 7 days |
+| `GET /api/analysis/smart-wallets` | Success of tokens by number of smart wallets (`from`, `to`) |
+| `GET /api/tokens/:mint` | Full history of one token (public tokens only, like every token endpoint) |
 | `GET /api/tokens/:mint/snapshots` | Snapshots of one token, oldest first |
 | `GET /api/tokens/:mint/candles` | OHLCV candles (`interval=1s\|1m\|5m`, `limit`), dev trades and SOL/USD price |
 | `GET /api/tokens/:mint/stream` | Live `trade` and `sol-price` events of one token |
 | `GET /api/stats` | Totals: tokens (active, dead, migrated), statuses, trades, snapshots |
-| `GET /api/stream` | Live `token`, `screening`, `momentum` and `status` events |
+| `GET /api/stream` | Live `token`, `screening`, `momentum`, `status` and `smart-wallet` events |
 
 Candles are built on request from the stored `trades` table, so they cover every trade of a
 tracked token. The SOL/USD price (for market caps in USD) is polled every minute from free,
@@ -208,7 +273,8 @@ because `tsx` and Vitest do not emit decorator metadata):
 | `TokenDiscoveryModule` | `NEW_TOKEN_SOURCE` (PumpPortal) |
 | `SafetyChecksModule` | `MINT_AUTHORITY_READER`, `HOLDER_DISTRIBUTION_READER`, `SAFETY_THRESHOLDS` |
 | `MomentumModule` | `MOMENTUM_TRACKER`, `TRADE_SOURCE` (Solana logs) |
-| `HistoryModule` | `HISTORY_STORE`, `HISTORY_READER`, `HISTORY_RECORDER`, `TOKEN_CATALOG_READER`, `SNAPSHOT_STORE` (PostgreSQL or SQLite) |
+| `HistoryModule` | `HISTORY_STORE`, `HISTORY_READER`, `HISTORY_RECORDER`, `TOKEN_CATALOG_READER`, `SNAPSHOT_STORE`, `WALLET_REPUTATION_STORE` (PostgreSQL or SQLite) |
+| `WalletReputationModule` | `SMART_WALLET_TRACKER`, `REPUTATION_CLOSER`, `WALLET_REPUTATION_QUERIES` |
 | `SnapshotsModule` | `SNAPSHOT_SCHEDULER`, `MARKET_DATA_SOURCE` (DexScreener) |
 | `LiveFeedModule` | `LIVE_FEED` |
 | `MarketPriceModule` | `SOL_PRICE_FEED`, `SOL_USD_PRICE` |

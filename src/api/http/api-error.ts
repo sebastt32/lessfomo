@@ -17,6 +17,8 @@ export const ApiErrors = {
   invalidQuery: (parameter: string, expected: string) =>
     new ApiError(400, "INVALID_QUERY", `Invalid query parameter "${parameter}": expected ${expected}`),
   tokenNotFound: () => new ApiError(404, "TOKEN_NOT_FOUND", "Token was never seen"),
+  invalidAddress: () => new ApiError(400, "INVALID_ADDRESS", "Address is not a base58 address"),
+  walletNotFound: () => new ApiError(404, "WALLET_NOT_FOUND", "Wallet has no closed results"),
   routeNotFound: () => new ApiError(404, "NOT_FOUND", "Route not found"),
   methodNotAllowed: () => new ApiError(405, "METHOD_NOT_ALLOWED", "Only GET is supported"),
   internal: () => new ApiError(500, "INTERNAL_ERROR", "Unexpected server error"),

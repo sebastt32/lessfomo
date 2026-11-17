@@ -4,29 +4,36 @@ import { HistoryModule } from "../history/history.module.js";
 import { LiveFeedModule } from "../live-feed/live-feed.module.js";
 import { MarketPriceModule } from "../market-price/market-price.module.js";
 import { errorMessage } from "../shared/error-message.js";
+import { WalletReputationModule } from "../wallet-reputation/wallet-reputation.module.js";
+import { AnalysisController } from "./controllers/analysis.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { MoversController } from "./controllers/movers.controller.js";
 import { ScreeningsController } from "./controllers/screenings.controller.js";
 import { StatsController } from "./controllers/stats.controller.js";
 import { StreamController } from "./controllers/stream.controller.js";
 import { TokensController } from "./controllers/tokens.controller.js";
+import { WalletsController } from "./controllers/wallets.controller.js";
 import { API_ERROR_REPORTER, ApiExceptionFilter, type ApiErrorReporter } from "./http/api-exception.filter.js";
 import { CorsMiddleware, GetOnlyMiddleware, RequestTargetMiddleware } from "./http/api-middleware.js";
 import { LiveStreams } from "./live-streams.js";
+import { TokenVisibility } from "./token-visibility.js";
 
 /** The read-only HTTP + SSE API described in docs/API.md. */
 @Module({
-  imports: [LiveFeedModule, HistoryModule, MarketPriceModule],
+  imports: [LiveFeedModule, HistoryModule, MarketPriceModule, WalletReputationModule],
   controllers: [
     HealthController,
     MoversController,
     ScreeningsController,
     StatsController,
     TokensController,
+    WalletsController,
+    AnalysisController,
     StreamController,
   ],
   providers: [
     LiveStreams,
+    TokenVisibility,
     { provide: API_ERROR_REPORTER, useValue: ((error) => console.error(`[api] ${errorMessage(error)}`)) satisfies ApiErrorReporter },
     { provide: APP_FILTER, useClass: ApiExceptionFilter },
   ],

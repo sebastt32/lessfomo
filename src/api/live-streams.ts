@@ -5,6 +5,7 @@ import type { LiveFeed } from "../live-feed/application/live-feed.js";
 import { LIVE_FEED } from "../live-feed/live-feed.module.js";
 import type { SolUsdPrice } from "../market-price/domain/sol-usd-price.js";
 import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
+import { TokenVisibility } from "./token-visibility.js";
 import { liveEventView, tradeView } from "./views.js";
 
 interface SseEvent {
@@ -30,26 +31,57 @@ export class LiveStreams implements BeforeApplicationShutdown {
     @Inject(APP_CONFIG) config: AppConfig,
     @Inject(LIVE_FEED) private readonly feed: LiveFeed,
     @Inject(SOL_USD_PRICE) private readonly solPrice: SolUsdPrice,
+    @Inject(TokenVisibility) private readonly visibility: TokenVisibility,
   ) {
     this.heartbeatMs = config.api.heartbeatMs;
   }
 
-  /** `GET /api/stream`: the current source statuses, then every live event. */
+  /** `GET /api/stream`: the current source statuses, then every live event of public tokens. */
   openFeed(request: IncomingMessage, response: ServerResponse): void {
     const { feed } = this;
     this.open(request, response, [{ name: "status", data: { sources: feed.getSources() } }], (send) => [
-      feed.subscribe((event) => send(liveEventView(event))),
+      feed.subscribePublic((event) => send(liveEventView(event))),
     ]);
   }
 
-  /** `GET /api/tokens/:mint/stream`: the known SOL/USD price, then this token's trades and price changes. */
+  /**
+   * `GET /api/tokens/:mint/stream`: nothing until the token is public; then the known SOL/USD price,
+   * then this token's trades and price changes.
+   */
   openToken(request: IncomingMessage, response: ServerResponse, mint: string): void {
-    const { feed, solPrice } = this;
-    const solUsd = solPrice.current();
-    this.open(request, response, solUsd === null ? [] : [{ name: "sol-price", data: { solUsd } }], (send) => [
-      feed.subscribeTrades(mint, (live) => send({ name: "trade", data: tradeView(live) })),
-      solPrice.subscribe((price) => send({ name: "sol-price", data: { solUsd: price } })),
-    ]);
+    const { feed, solPrice, visibility } = this;
+    let visible = false;
+    let closed = false;
+    this.open(request, response, [], (send) => {
+      const becomeVisible = (): boolean => {
+        if (visible || closed) return visible;
+        if (!feed.isPublic(mint)) return false;
+        visible = true;
+        const solUsd = solPrice.current();
+        if (solUsd !== null) send({ name: "sol-price", data: { solUsd } });
+        return true;
+      };
+      visibility
+        .isPublic(mint)
+        .then((stored) => {
+          if (!stored || visible || closed) return;
+          visible = true;
+          const solUsd = solPrice.current();
+          if (solUsd !== null) send({ name: "sol-price", data: { solUsd } });
+        })
+        .catch(() => undefined);
+      return [
+        feed.subscribeTrades(mint, (live) => {
+          if (becomeVisible()) send({ name: "trade", data: tradeView(live) });
+        }),
+        solPrice.subscribe((price) => {
+          if (becomeVisible()) send({ name: "sol-price", data: { solUsd: price } });
+        }),
+        () => {
+          closed = true;
+        },
+      ];
+    });
   }
 
   /** Number of open SSE connections. */

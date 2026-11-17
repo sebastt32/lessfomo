@@ -9,7 +9,17 @@ import { ApiErrors } from "../http/api-error.js";
 import { LimitPipe, MintPipe, parseCandleInterval, SearchParam, SearchParams } from "../http/request-params.js";
 import { parseTokenListQuery } from "../http/token-list-query.js";
 import { LiveStreams } from "../live-streams.js";
-import { candleView, devTradeView, tokenHistoryView, tokenListItemView, tokenSnapshotsView } from "../views.js";
+import { TokenVisibility } from "../token-visibility.js";
+import type { WalletReputationQueries } from "../../wallet-reputation/application/wallet-reputation-queries.js";
+import { WALLET_REPUTATION_QUERIES } from "../../wallet-reputation/wallet-reputation.module.js";
+import {
+  candleView,
+  devTradeView,
+  smartWalletInTokenView,
+  tokenHistoryView,
+  tokenListItemView,
+  tokenSnapshotsView,
+} from "../views.js";
 
 const DEFAULT_CANDLES_LIMIT = 300;
 const MAX_CANDLES_LIMIT = 1000;
@@ -24,6 +34,8 @@ export class TokensController {
     @Inject(TOKEN_CATALOG_READER) private readonly catalog: TokenCatalogReader,
     @Inject(SOL_USD_PRICE) private readonly solPrice: SolUsdPrice,
     @Inject(LiveStreams) private readonly streams: LiveStreams,
+    @Inject(WALLET_REPUTATION_QUERIES) private readonly reputation: WalletReputationQueries,
+    @Inject(TokenVisibility) private readonly visibility: TokenVisibility,
   ) {}
 
   @Get("tokens")
@@ -35,9 +47,18 @@ export class TokensController {
 
   @Get("tokens/:mint/snapshots")
   async snapshots(@Param("mint", MintPipe) mint: string) {
+    await this.visibility.assertPublic(mint);
     const snapshots = await this.catalog.tokenSnapshots(mint, new Date());
     if (snapshots === null) throw ApiErrors.tokenNotFound();
     return tokenSnapshotsView(mint, snapshots);
+  }
+
+  @Get("tokens/:mint/smart-wallets")
+  async smartWallets(@Param("mint", MintPipe) mint: string) {
+    await this.visibility.assertPublic(mint);
+    if ((await this.history.tokenHistory(mint)) === null) throw ApiErrors.tokenNotFound();
+    const wallets = await this.reputation.tokenSmartWallets(mint, new Date());
+    return { mint, smartWallets: wallets.map(smartWalletInTokenView) };
   }
 
   @Get("tokens/:mint/candles")
@@ -47,6 +68,7 @@ export class TokensController {
     @SearchParam("limit", new LimitPipe(DEFAULT_CANDLES_LIMIT, MAX_CANDLES_LIMIT)) limit: number,
   ) {
     const interval = parseCandleInterval(rawInterval);
+    await this.visibility.assertPublic(mint);
     const chart = await this.history.tokenChart(mint, interval.seconds, limit);
     if (chart === null) throw ApiErrors.tokenNotFound();
     return {
@@ -66,6 +88,7 @@ export class TokensController {
 
   @Get("tokens/:mint")
   async token(@Param("mint", MintPipe) mint: string) {
+    await this.visibility.assertPublic(mint);
     const tokenHistory = await this.history.tokenHistory(mint);
     if (tokenHistory === null) throw ApiErrors.tokenNotFound();
     return tokenHistoryView(tokenHistory);

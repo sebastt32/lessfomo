@@ -1,4 +1,5 @@
 import type { MomentumComponents, MomentumMetrics } from "../../momentum/domain/compute-momentum.js";
+import type { SmartWalletsSummary } from "../../wallet-reputation/domain/wallet-reputation-store.js";
 
 export interface StoredToken {
   readonly mint: string;
@@ -24,6 +25,8 @@ export interface StoredScreening {
   readonly evaluatedAt: Date;
   /** Creation time of the token; null if the token itself was never stored. */
   readonly detectedAt: Date | null;
+  /** Smart wallets (point-in-time tier at entry) that bought the token so far. */
+  readonly smartWallets: SmartWalletsSummary;
 }
 
 export interface StoredMomentumPoint {
@@ -73,8 +76,8 @@ export interface TokenChart {
 
 /** Port: read access to stored history. */
 export interface HistoryReader {
-  /** Newest first. */
-  recentScreenings(limit: number): Promise<StoredScreening[]>;
+  /** Newest first; with `minSmartWallets` > 0, only screenings of tokens bought by that many smart wallets. */
+  recentScreenings(limit: number, minSmartWallets?: number): Promise<StoredScreening[]>;
   tokenHistory(mint: string): Promise<TokenHistory | null>;
   /**
    * Candles of `intervalSeconds` built from every stored trade of a token, keeping the most

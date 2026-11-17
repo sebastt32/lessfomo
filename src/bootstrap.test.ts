@@ -17,6 +17,8 @@ import { HOLDER_DISTRIBUTION_READER, MINT_AUTHORITY_READER } from "./safety-chec
 import { MARKET_DATA_SOURCE } from "./snapshots/snapshots.module.js";
 import type { NewToken } from "./token-discovery/domain/new-token.js";
 import { NEW_TOKEN_SOURCE } from "./token-discovery/token-discovery.module.js";
+import type { SmartWalletTracker } from "./wallet-reputation/application/smart-wallet-tracker.js";
+import { SMART_WALLET_TRACKER } from "./wallet-reputation/wallet-reputation.module.js";
 
 const MINT = "E3rpattxgipu5MoxktjsXHwEaYVfmowta9tnCp6bpump";
 
@@ -88,6 +90,8 @@ class FakeHistory {
   watchedTokens = async () => [];
   dueTokens = async () => [];
   updateMarkets = async (): Promise<void> => undefined;
+  smartWallets: string[] = [];
+  saveSmartWallet = async (mint: string, entry: { wallet: string }): Promise<void> => void this.smartWallets.push(`${mint}:${entry.wallet}`);
   close = async (): Promise<void> => {
     this.onClose();
     events.push("history.close");
@@ -179,7 +183,22 @@ describe("lessfomo app wiring", () => {
 
   it("feeds tokens and trades through history, screening, momentum and the API", async () => {
     const port = await freePort();
-    const { tokens, trades, history } = await boot(testConfig(port));
+    const { app: running, tokens, trades, history } = await boot(testConfig(port));
+    running.get<SmartWalletTracker>(SMART_WALLET_TRACKER).updateRecords([
+      {
+        address: "fan",
+        tier: "good",
+        isBot: false,
+        tokens: 5,
+        wins: 4,
+        winRate: 80,
+        netPnlSol: 2,
+        avgPnlSol: 0.4,
+        medianEntrySeconds: 10,
+        lastActiveAt: null,
+        updatedAt: new Date(),
+      },
+    ]);
 
     tokens.emit(token);
     trades.emit(trade);
@@ -192,7 +211,9 @@ describe("lessfomo app wiring", () => {
     expect(logs).toContain(`?  UNVERIFIED MON          ${MINT}  (Mint account not found)`);
     expect(logs).toContain("[momentum] tracking 1 token(s), 1 trade(s) buffered, 1 active");
     const movers = await (await fetch(`http://127.0.0.1:${port}/api/movers`)).json();
-    expect(movers.movers[0]).toMatchObject({ mint: MINT, status: "unverified" });
+    // "fan" is a good wallet: its buy makes the token public, counted live and stored.
+    expect(movers.movers[0]).toMatchObject({ mint: MINT, status: "unverified", smartWallets: { count: 1, elite: 0, holding: 1 } });
+    expect(history.smartWallets).toEqual([`${MINT}:fan`]);
   });
 
   it("shuts down the pipeline, then the API and its streams, then the history", async () => {

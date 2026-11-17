@@ -22,6 +22,7 @@ describe("parseTokenListQuery", () => {
       statuses: [],
       lifecycle: null,
       minScore: null,
+      minSmartWallets: 1,
       search: null,
       sort: { field: "detectedAt", direction: "desc" },
       page: 1,
@@ -41,6 +42,7 @@ describe("parseTokenListQuery", () => {
       statuses: ["passed", "unverified"],
       lifecycle: "dead",
       minScore: 42.5,
+      minSmartWallets: 1,
       search: "Pepe",
       sort: { field: "liquidity", direction: "asc" },
       page: 3,
@@ -78,10 +80,31 @@ describe("parseTokenListQuery", () => {
     ["page=1.5", "page"],
     ["pageSize=ten", "pageSize"],
     [`q=${"x".repeat(101)}`, "q"],
+    ["minSmartWallets=-1", "minSmartWallets"],
+    ["minSmartWallets=1.5", "minSmartWallets"],
+    ["minSmartWallets=two", "minSmartWallets"],
+    ["minSmartWallets=", "minSmartWallets"],
+    ["minSmartWallets=99999999999999999999", "minSmartWallets"],
+    ["sort=smartWallets:asc", "sort"],
   ])("answers 400 INVALID_QUERY naming the parameter for %s", (query, parameter) => {
     const error = rejection(query);
 
     expect(error).toMatchObject({ status: 400, code: "INVALID_QUERY" });
     expect(error.message).toContain(`"${parameter}"`);
+  });
+
+  it("reads minSmartWallets as an integer, 1 by default, treating values below 1 as 1", () => {
+    expect(parse("").minSmartWallets).toBe(1);
+    expect(parse("minSmartWallets=0").minSmartWallets).toBe(1);
+    expect(parse("minSmartWallets=3").minSmartWallets).toBe(3);
+  });
+
+  it("sorts by smart wallets, most first, without changing the sort error message", () => {
+    expect(parse("sort=smartWallets:desc").sort).toEqual({ field: "smartWallets", direction: "desc" });
+    expect(parse("sort=smartWallets").sort).toEqual({ field: "smartWallets", direction: "desc" });
+    expect(rejection("sort=smartWallets:asc").message).toBe(
+      'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
+    );
+    expect(rejection("minSmartWallets=-1").message).toBe('Invalid query parameter "minSmartWallets": expected an integer of at least 1');
   });
 });

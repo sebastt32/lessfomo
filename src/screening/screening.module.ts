@@ -6,6 +6,7 @@ import { MomentumModule } from "../momentum/momentum.module.js";
 import { SafetyChecksModule } from "../safety-checks/safety-checks.module.js";
 import { SnapshotsModule } from "../snapshots/snapshots.module.js";
 import { TokenDiscoveryModule } from "../token-discovery/token-discovery.module.js";
+import { WalletReputationModule } from "../wallet-reputation/wallet-reputation.module.js";
 import { ScreeningPipeline } from "./screening-pipeline.js";
 
 @Module({
@@ -17,6 +18,7 @@ import { ScreeningPipeline } from "./screening-pipeline.js";
     LiveFeedModule,
     MarketPriceModule,
     SnapshotsModule,
+    WalletReputationModule,
   ],
   providers: [ScreeningPipeline],
   exports: [ScreeningPipeline],

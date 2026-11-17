@@ -21,6 +21,9 @@ import type { SnapshotScheduler } from "../snapshots/application/snapshot-schedu
 import { SNAPSHOT_SCHEDULER } from "../snapshots/snapshots.module.js";
 import type { NewTokenSource } from "../token-discovery/domain/new-token-source.js";
 import { NEW_TOKEN_SOURCE } from "../token-discovery/token-discovery.module.js";
+import type { ReputationCloser } from "../wallet-reputation/application/reputation-closer.js";
+import type { SmartWalletTracker } from "../wallet-reputation/application/smart-wallet-tracker.js";
+import { REPUTATION_CLOSER, SMART_WALLET_TRACKER } from "../wallet-reputation/wallet-reputation.module.js";
 import { formatMover, formatScreening } from "./console-report.js";
 import { TokenScreener } from "./token-screener.js";
 
@@ -57,12 +60,15 @@ export class ScreeningPipeline implements OnModuleDestroy {
     @Inject(HOLDER_DISTRIBUTION_READER) distributionReader: HolderDistributionReader,
     @Inject(SAFETY_THRESHOLDS) thresholds: SafetyThresholds,
     @Inject(SNAPSHOT_SCHEDULER) private readonly snapshots: SnapshotScheduler,
+    @Inject(SMART_WALLET_TRACKER) private readonly smartWallets: SmartWalletTracker,
+    @Inject(REPUTATION_CLOSER) private readonly reputation: ReputationCloser,
   ) {
     /** Feeds every new token to the live feed, the history and the momentum tracker before screening it. */
     const observedTokens: NewTokenSource = {
       start: (onToken) =>
         tokens.start((token) => {
           tracker.track(token, token.detectedAt);
+          smartWallets.track(token);
           safely("history", () => recorder.recordToken(token));
           snapshots.tokenDetected(token);
           feed.tokenDetected(token);
@@ -99,12 +105,15 @@ export class ScreeningPipeline implements OnModuleDestroy {
       this.snapshots.tradeObserved(trade);
       if (!this.tracker.record(trade)) return;
       safely("history", () => this.recorder.recordTrade(trade));
+      // Smart wallets first, so a token's public trade stream includes the buy that makes it public.
+      this.smartWallets.tradeRecorded(trade);
       this.feed.tradeRecorded(trade);
     });
+    this.reputation.start();
     this.momentumTimer = setInterval(() => this.reportMomentum(), this.config.momentum.reportIntervalMs);
   }
 
-  /** Stops the timer, then the SOL price, trade and token sources, in that order, then the snapshots. */
+  /** Stops the timer, then the SOL price, trade and token sources, in that order, then the snapshots and the reputation job. */
   async onModuleDestroy(): Promise<void> {
     if (this.momentumTimer === null) return;
     clearInterval(this.momentumTimer);
@@ -113,6 +122,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
     this.tradeSource.stop();
     this.screener.stop();
     await this.snapshots.stop();
+    await this.reputation.stop();
   }
 
   /** Records and publishes momentum of active tokens, then prints the top movers. */
@@ -124,6 +134,7 @@ export class ScreeningPipeline implements OnModuleDestroy {
     const snapshots = tracker.snapshot(now).filter((s) => s.momentum.metrics.tradeCount5m > 0);
     for (const snapshot of snapshots) safely("history", () => recorder.recordMomentum(snapshot));
     feed.prune(now, trackingWindowMs + evaluationDelayMs);
+    this.smartWallets.prune(now);
     feed.momentumUpdated(snapshots, now);
 
     console.log(

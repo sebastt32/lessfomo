@@ -18,7 +18,17 @@ import type {
   TokenListQuery,
   TokenSortField,
 } from "../domain/token-catalog-reader.js";
-import { numberOrNull, toDate, toDateOrNull, toToken, type ChartDialect, type Row, type SqlValue } from "./history-rows.js";
+import {
+  numberOrNull,
+  SMART_SUMMARY_COLUMNS,
+  toDate,
+  toDateOrNull,
+  toSmartWalletsSummary,
+  toToken,
+  type ChartDialect,
+  type Row,
+  type SqlValue,
+} from "./history-rows.js";
 
 /**
  * SQL and row mapping of the token catalog (`token_state`) and its snapshots (`token_snapshots`),
@@ -39,7 +49,7 @@ export interface Statement {
 }
 
 /** Collects parameters and returns their placeholders, so dynamic queries stay parameterized. */
-class Params {
+export class Params {
   readonly values: SqlValue[] = [];
   constructor(private readonly dialect: CatalogDialect) {}
   add(value: SqlValue, type?: SqlType): string {
@@ -390,6 +400,7 @@ const SORT_COLUMNS: Readonly<Record<TokenSortField, string>> = {
   maxScore: "s.max_score",
   peakMarketCapSol: "s.peak_price_sol",
   liquidity: "s.liquidity_sol",
+  smartWallets: "w.wallets",
 };
 
 const escapeLike = (text: string): string => text.replace(/[\\%_]/g, (character) => `\\${character}`);
@@ -416,6 +427,7 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
     }
     if (query.lifecycle !== null) where.push(`${lifecycle()} = ${params.add(query.lifecycle)}`);
     if (query.minScore !== null) where.push(`s.max_score >= ${params.add(query.minScore, "real")}`);
+    if (query.minSmartWallets > 0) where.push(`w.wallets >= ${params.add(query.minSmartWallets, "integer")}`);
     if (query.search !== null) {
       const text = escapeLike(query.search.toLowerCase());
       const contains = params.add(`%${text}%`);
@@ -424,7 +436,9 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
         `(LOWER(t.symbol) LIKE ${contains} ESCAPE '\\' OR LOWER(t.name) LIKE ${contains} ESCAPE '\\' OR LOWER(t.mint) LIKE ${prefix} ESCAPE '\\')`,
       );
     }
-    const from = `FROM tokens t LEFT JOIN token_state s ON s.mint = t.mint${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""}`;
+    const from = `FROM tokens t LEFT JOIN token_state s ON s.mint = t.mint LEFT JOIN smart_wallet_tokens w ON w.mint = t.mint${
+      where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""
+    }`;
     if (forCount) return { sql: `SELECT COUNT(*) AS n ${from}`, params: params.values };
 
     const direction = query.sort.direction === "asc" ? "ASC" : "DESC";
@@ -432,7 +446,7 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
     SELECT t.*, COALESCE(s.status, 'pending') AS status_now, ${lifecycle()} AS lifecycle_now,
            s.max_score, s.holders, s.liquidity_sol, s.bonding_curve_pct, s.migrated,
            s.last_price_sol, s.peak_price_sol, s.last_trade_at,
-           (SELECT COUNT(*) FROM token_snapshots x WHERE x.mint = t.mint) AS snapshot_count
+           (SELECT COUNT(*) FROM token_snapshots x WHERE x.mint = t.mint) AS snapshot_count, ${SMART_SUMMARY_COLUMNS}
     ${from}
     ORDER BY ${SORT_COLUMNS[query.sort.field]} ${direction} NULLS LAST, t.detected_at DESC, t.mint ASC
     LIMIT ${params.add(query.pageSize)} OFFSET ${params.add((query.page - 1) * query.pageSize)}`;
@@ -456,6 +470,7 @@ export const toTokenListEntry = (row: Row): TokenListEntry => ({
   holders: numberOrNull(row["holders"]),
   lastTradeAt: toDateOrNull(row["last_trade_at"]),
   snapshotCount: Number(row["snapshot_count"] ?? 0),
+  smartWallets: toSmartWalletsSummary(row),
 });
 
 /** Lifecycle of one token, or no row if it was never seen. */

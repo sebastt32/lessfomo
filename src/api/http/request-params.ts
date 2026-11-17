@@ -40,6 +40,14 @@ export class MintPipe implements PipeTransform<string, string> {
   }
 }
 
+/** A base58 wallet address, or 400 INVALID_ADDRESS. */
+export class AddressPipe implements PipeTransform<string, string> {
+  transform(address: string): string {
+    if (!BASE58_MINT.test(address)) throw ApiErrors.invalidAddress();
+    return address;
+  }
+}
+
 export interface CandleInterval {
   readonly name: string;
   readonly seconds: number;

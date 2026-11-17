@@ -75,9 +75,40 @@ const screening: StoredScreening = {
   totalHolders: 3,
   evaluatedAt: new Date("2026-11-13T20:02:00.000Z"),
   detectedAt: new Date("2026-11-13T20:01:00.000Z"),
+  smartWallets: { count: 2, elite: 1, holding: 1 },
 };
 const SCREENING_VIEW = { ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z", detectedAt: "2026-11-13T20:01:00.000Z" };
 const UNKNOWN_LIQUIDITY = { sol: null, bondingCurvePct: null, migrated: false };
+const SMART = { count: 1, elite: 0, holding: 1 };
+
+/** A good wallet buys the token live: from then on it is public (docs/API.md "Public visibility rule"). */
+const qualify = (feed: LiveFeed, mint = MINT): void =>
+  feed.smartWalletChanged({
+    mint,
+    smartWallets: SMART,
+    wallet: {
+      wallet: "goodWallet",
+      tierAtEntry: "good",
+      firstBuyAt: new Date("2026-11-13T20:01:30.000Z"),
+      entrySeconds: 30,
+      boughtSol: 1,
+      soldSol: 0,
+      stillHolding: true,
+      record: {
+        address: "goodWallet",
+        tier: "good",
+        isBot: false,
+        tokens: 5,
+        wins: 4,
+        winRate: 80,
+        netPnlSol: 2,
+        avgPnlSol: 0.4,
+        medianEntrySeconds: 12,
+        lastActiveAt: null,
+        updatedAt: new Date("2026-11-13T20:00:00.000Z"),
+      },
+    },
+  });
 
 const tokenSnapshots: TokenSnapshots = {
   lifecycle: "active",
@@ -142,6 +173,17 @@ class FakeSolPrice implements SolUsdPrice {
   }
 }
 
+const tradeViewOf = (t: Trade) => ({
+  signature: t.signature,
+  trader: t.trader,
+  side: t.side,
+  solAmount: t.solAmount,
+  tokenAmount: t.tokenAmount,
+  priceSol: t.priceSol,
+  isDev: false,
+  time: Math.floor(t.timestamp.getTime() / 1000),
+});
+
 const trade = (overrides: Partial<Trade> = {}): Trade => ({
   signature: "tradeSig",
   mint: MINT,
@@ -155,14 +197,25 @@ const trade = (overrides: Partial<Trade> = {}): Trade => ({
 });
 
 class FakeHistory implements HistoryReader, TokenCatalogReader {
+  /** Tokens with a stored good-or-elite wallet. */
+  publicMints = new Set([MINT]);
+  async tokenSmartSummary(mint: string) {
+    if (this.fail) throw new Error("disk on fire");
+    return this.publicMints.has(mint) ? { count: 2, elite: 1, holding: 1 } : { count: 0, elite: 0, holding: 0 };
+  }
+  async mintsWithSmartWallets(mints: readonly string[]) {
+    return new Set(mints.filter((mint) => this.publicMints.has(mint)));
+  }
   closed = false;
   listQueries: TokenListQuery[] = [];
   requestedLimits: number[] = [];
   chartRequests: { mint: string; intervalSeconds: number; limit: number }[] = [];
   fail = false;
-  async recentScreenings(limit: number): Promise<StoredScreening[]> {
+  screeningMinimums: (number | undefined)[] = [];
+  async recentScreenings(limit: number, minSmartWallets?: number): Promise<StoredScreening[]> {
     if (this.fail) throw new Error("disk on fire");
     this.requestedLimits.push(limit);
+    this.screeningMinimums.push(minSmartWallets);
     return [screening];
   }
   async tokenHistory(mint: string): Promise<TokenHistory | null> {
@@ -206,6 +259,7 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
           holders: 61,
           lastTradeAt: new Date("2026-11-13T20:30:00.000Z"),
           snapshotCount: 5,
+          smartWallets: { count: 3, elite: 1, holding: 2 },
         },
       ],
     };
@@ -308,6 +362,7 @@ describe("API (Nest e2e)", () => {
   it("returns movers as views with ISO dates", async () => {
     const { feed, base } = await start();
     feed.tokenDetected(token);
+    qualify(feed);
     feed.momentumUpdated([snapshot], snapshot.at);
 
     expect(await (await fetch(`${base}/api/movers`)).json()).toEqual({
@@ -323,6 +378,7 @@ describe("API (Nest e2e)", () => {
           components,
           metrics,
           liquidity: UNKNOWN_LIQUIDITY,
+          smartWallets: SMART,
         },
       ],
     });
@@ -331,6 +387,7 @@ describe("API (Nest e2e)", () => {
   it("reports each mover's latest bonding curve liquidity from its trades", async () => {
     const { feed, base } = await start();
     feed.tokenDetected(token);
+    qualify(feed);
     feed.tradeRecorded(trade({ curve: { realSolReserves: 16.77, progressPct: 48.51, complete: false } }));
     feed.momentumUpdated([snapshot], snapshot.at);
 
@@ -528,7 +585,10 @@ describe("API (Nest e2e)", () => {
 
     const response = await fetch(`${base}/api/stream`);
     expect(response.headers.get("content-type")).toBe("text/event-stream");
-    setTimeout(() => feed.tokenDetected(token), 20);
+    setTimeout(() => {
+      feed.tokenDetected(token);
+      qualify(feed);
+    }, 20);
 
     const text = await readSse(response, (t) => t.includes("event: token"));
 
@@ -550,6 +610,7 @@ describe("API (Nest e2e)", () => {
   it("streams screening and momentum events as views", async () => {
     const { feed, base } = await start();
     feed.tokenDetected(token);
+    qualify(feed);
 
     const response = await fetch(`${base}/api/stream`);
     setTimeout(() => {
@@ -573,9 +634,34 @@ describe("API (Nest e2e)", () => {
       totalHolders: null,
       evaluatedAt: "2026-11-13T20:02:00.000Z",
       detectedAt: "2026-11-13T20:01:00.000Z",
+      smartWallets: SMART,
     });
     expect(momentumData.at).toBe("2026-11-13T20:05:00.000Z");
     expect(momentumData.movers[0]).toMatchObject({ mint: MINT, status: "unverified", score: 21 });
+  });
+
+  it("hides a token's live events until a good wallet buys it, then announces it", async () => {
+    const { feed, base } = await start();
+    const other = { ...snapshot, mint: "Other11111111111111111111111111111111111111" };
+    feed.tokenDetected({ ...token, mint: other.mint });
+
+    const response = await fetch(`${base}/api/stream`);
+    setTimeout(() => {
+      feed.tokenDetected(token);
+      feed.screeningFinished({ token, status: "unverified", reason: "RugCheck responded 429" }, screening.evaluatedAt);
+      feed.momentumUpdated([snapshot, other], snapshot.at);
+      qualify(feed);
+      feed.momentumUpdated([snapshot, other], snapshot.at);
+    }, 20);
+
+    const text = await readSse(response, (t) => (t.match(/event: momentum/g) ?? []).length === 2);
+    const events = [...text.matchAll(/event: (\S+)\ndata: (.*)\n/g)].map(([, name, data]) => [name, JSON.parse(data ?? "null")]);
+
+    expect(events.map(([name]) => name)).toEqual(["status", "momentum", "token", "screening", "smart-wallet", "momentum"]);
+    expect(events[1]?.[1].movers).toEqual([]);
+    expect(events[2]?.[1].mint).toBe(MINT);
+    expect(events[3]?.[1]).toMatchObject({ mint: MINT, status: "unverified", smartWallets: SMART });
+    expect(events[5]?.[1].movers.map((m: { mint: string }) => m.mint)).toEqual([MINT]);
   });
 
   it("sends heartbeat comments", async () => {
@@ -687,6 +773,38 @@ describe("API (Nest e2e)", () => {
     });
   });
 
+  describe("public visibility rule", () => {
+    it("answers 404 TOKEN_NOT_FOUND everywhere for a token without a good wallet, until one buys it", async () => {
+      const { feed, history, base } = await start();
+      history.publicMints.clear();
+      const paths = [`/api/tokens/${MINT}`, `/api/tokens/${MINT}/candles`, `/api/tokens/${MINT}/snapshots`, `/api/tokens/${MINT}/smart-wallets`];
+
+      for (const path of paths) {
+        const response = await fetch(`${base}${path}`);
+        expect([path, response.status, (await response.json()).error.code]).toEqual([path, 404, "TOKEN_NOT_FOUND"]);
+      }
+      feed.tokenDetected(token);
+      qualify(feed);
+
+      for (const path of paths.slice(0, 3)) expect([path, (await fetch(`${base}${path}`)).status]).toEqual([path, 200]);
+      expect((await fetch(`${base}/api/stats`)).status).toBe(200);
+    });
+
+    it("lists only tokens, screenings and movers with at least one good wallet, whatever minSmartWallets says", async () => {
+      const { feed, history, base } = await start();
+      feed.tokenDetected(token);
+      feed.momentumUpdated([snapshot], snapshot.at);
+
+      expect((await (await fetch(`${base}/api/movers?minSmartWallets=0`)).json()).movers).toEqual([]);
+      await fetch(`${base}/api/tokens`);
+      await fetch(`${base}/api/tokens?minSmartWallets=0`);
+      await fetch(`${base}/api/tokens?minSmartWallets=3`);
+      expect(history.listQueries.map((q) => q.minSmartWallets)).toEqual([1, 1, 3]);
+      await fetch(`${base}/api/screenings?minSmartWallets=0`);
+      expect(history.screeningMinimums).toEqual([1]);
+    });
+  });
+
   describe("token list, snapshots and stats", () => {
     it("lists tokens from the history with their latest state and the total", async () => {
       const { history, base } = await start();
@@ -717,6 +835,7 @@ describe("API (Nest e2e)", () => {
             holders: 61,
             lastTradeAt: "2026-11-13T20:30:00.000Z",
             snapshotCount: 5,
+            smartWallets: { count: 3, elite: 1, holding: 2 },
           },
         ],
         page: 1,
@@ -982,15 +1101,27 @@ describe("API (Nest e2e)", () => {
       expect(text).toBe('retry: 5000\n\nevent: sol-price\ndata: {"solUsd":150.5}\n\n');
     });
 
-    it("accepts a valid mint that was never seen", async () => {
-      const { feed, base } = await start();
+    it("accepts a valid mint that was never seen and sends nothing until a good wallet buys it", async () => {
+      const { feed, solPrice, base } = await start();
+      const mint = "11111111111111111111111111111111";
 
-      const response = await fetch(`${base}/api/tokens/11111111111111111111111111111111/stream`);
-      setTimeout(() => feed.tradeRecorded(trade({ mint: "11111111111111111111111111111111" })), 20);
+      const response = await fetch(`${base}/api/tokens/${mint}/stream`);
+      setTimeout(() => {
+        feed.tradeRecorded(trade({ mint, signature: "hidden" }));
+        solPrice.set(150);
+        feed.tokenDetected({ ...token, mint });
+        qualify(feed, mint);
+        feed.tradeRecorded(trade({ mint, signature: "shown" }));
+      }, 20);
       const text = await readSse(response, (t) => t.includes("event: trade"));
 
       expect(response.status).toBe(200);
-      expect(text).toContain('"isDev":false');
+      expect(text).not.toContain("hidden");
+      expect(text).toBe(
+        `retry: 5000\n\nevent: sol-price\ndata: {"solUsd":150}\n\nevent: trade\ndata: ${JSON.stringify(
+          tradeViewOf(trade({ mint, signature: "shown" })),
+        )}\n\n`,
+      );
     });
 
     it("answers 400 INVALID_MINT for a malformed mint", async () => {
