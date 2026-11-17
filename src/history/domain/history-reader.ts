@@ -76,8 +76,11 @@ export interface TokenChart {
 
 /** Port: read access to stored history. */
 export interface HistoryReader {
-  /** Newest first; with `minSmartWallets` > 0, only screenings of tokens bought by that many smart wallets. */
-  recentScreenings(limit: number, minSmartWallets?: number): Promise<StoredScreening[]>;
+  /**
+   * Newest first; with `minSmartWallets` > 0, only screenings of tokens bought by that many smart
+   * wallets; with `minConvictionWallets` > 0, only those with that many conviction wallets.
+   */
+  recentScreenings(limit: number, minSmartWallets?: number, minConvictionWallets?: number): Promise<StoredScreening[]>;
   tokenHistory(mint: string): Promise<TokenHistory | null>;
   /**
    * Candles of `intervalSeconds` built from every stored trade of a token, keeping the most

@@ -26,6 +26,7 @@ describe("foldPositions", () => {
       wallet: "a",
       firstBuyAt: at(2),
       firstBuyIndex: 1,
+      firstSellAt: at(3), // D7: first sell after the first buy
       boughtSol: 1,
       soldSol: 2,
       boughtTokens: 100,
@@ -61,11 +62,11 @@ describe("closeTokenResults", () => {
     expect(lastPriceSol).toBe(0.004);
     expect(results).toEqual([
       // 1.5 realized + 500 × 0.004 − 1 = 2.5
-      { wallet: "a", firstBuyAt: at(5), entrySeconds: 5, boughtSol: 1, soldSol: 1.5, pnlSol: 2.5, closedAt: CLOSED },
+      { wallet: "a", firstBuyAt: at(5), firstSellAt: at(60), entrySeconds: 5, boughtSol: 1, soldSol: 1.5, pnlSol: 2.5, closedAt: CLOSED },
       // 1000 × 0.004 − 2 = 2
-      { wallet: "b", firstBuyAt: at(20), entrySeconds: 20, boughtSol: 2, soldSol: 0, pnlSol: 2, closedAt: CLOSED },
+      { wallet: "b", firstBuyAt: at(20), firstSellAt: null, entrySeconds: 20, boughtSol: 2, soldSol: 0, pnlSol: 2, closedAt: CLOSED },
       // 125 × 0.004 − 0.5 = 0
-      { wallet: "c", firstBuyAt: at(120), entrySeconds: 120, boughtSol: 0.5, soldSol: 0, pnlSol: 0, closedAt: CLOSED },
+      { wallet: "c", firstBuyAt: at(120), firstSellAt: null, entrySeconds: 120, boughtSol: 0.5, soldSol: 0, pnlSol: 0, closedAt: CLOSED },
     ]);
   });
 

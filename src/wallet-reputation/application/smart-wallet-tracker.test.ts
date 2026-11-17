@@ -33,8 +33,8 @@ const trade = (trader: string, side: "buy" | "sell", seconds: number, tokenAmoun
   timestamp: at(seconds),
 });
 
-const GOOD_STATS: ReputationStats = { tokens: 5, wins: 4, netPnlSol: 2 };
-const ELITE_STATS: ReputationStats = { tokens: 12, wins: 9, netPnlSol: 8 };
+const GOOD_STATS: ReputationStats = { tokens: 5, wins: 4, netPnlSol: 2, flips: 0 };
+const ELITE_STATS: ReputationStats = { tokens: 12, wins: 9, netPnlSol: 8, flips: 0 };
 
 const setup = () => {
   const changes: SmartWalletChange[] = [];
@@ -70,14 +70,15 @@ describe("SmartWalletTracker", () => {
     tracker.tradeRecorded(trade("elite", "buy", 7));
     await tracker.rateThrough(at(7));
 
-    expect(tracker.summary("m")).toEqual({ count: 2, elite: 1, holding: 2 });
+    expect(tracker.summary("m")).toEqual({ count: 2, elite: 1, holding: 2, conviction: 2 });
     expect(changes.map((change) => [change.wallet.wallet, change.smartWallets])).toEqual([
-      ["good", { count: 1, elite: 0, holding: 1 }],
-      ["elite", { count: 2, elite: 1, holding: 2 }],
+      ["good", { count: 1, elite: 0, holding: 1, conviction: 1 }],
+      ["elite", { count: 2, elite: 1, holding: 2, conviction: 2 }],
     ]);
     expect(changes[0]?.wallet).toEqual({
       wallet: "good",
       tierAtEntry: "good",
+      styleAtEntry: "conviction",
       firstBuyAt: at(5),
       entrySeconds: 5,
       boughtSol: 0.5,
@@ -97,7 +98,7 @@ describe("SmartWalletTracker", () => {
     tracker.tradeRecorded(trade("dev", "buy", 1));
     await tracker.rateThrough(at(10));
 
-    expect(tracker.summary("m")).toEqual({ count: 0, elite: 0, holding: 0 });
+    expect(tracker.summary("m")).toEqual({ count: 0, elite: 0, holding: 0, conviction: 0 });
     expect(changes).toEqual([]);
   });
 
@@ -110,7 +111,7 @@ describe("SmartWalletTracker", () => {
     tracker.tradeRecorded(trade("good", "buy", 2));
     await tracker.rateThrough(at(2));
 
-    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 1 });
+    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 1, conviction: 1 });
   });
 
   it("ignores a wallet whose first buy came before it was good", async () => {
@@ -138,7 +139,7 @@ describe("SmartWalletTracker", () => {
     expect(asked).toEqual([{ buys: [{ wallet: "good", at: at(5) }], excludedMint: "m" }]);
     // Trades seen while it waited are part of its position.
     expect(changes.map((change) => change.wallet.boughtSol)).toEqual([1]);
-    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 1 });
+    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 1, conviction: 1 });
   });
 
   it("never rates a buy with a cached record: a stale good record does not count", async () => {
@@ -189,7 +190,7 @@ describe("SmartWalletTracker", () => {
     tracker.tradeRecorded(trade("good", "sell", 3, 600));
     tracker.tradeRecorded(trade("good", "sell", 4, 1));
 
-    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 0 });
+    expect(tracker.summary("m")).toEqual({ count: 1, elite: 0, holding: 0, conviction: 1 });
     expect(changes.map((change) => [change.wallet.stillHolding, change.wallet.soldSol])).toEqual([
       [true, 0],
       [false, 1],
@@ -208,7 +209,7 @@ describe("SmartWalletTracker", () => {
     tracker.prune(at(3_600 + 1));
 
     expect(changes).toHaveLength(1);
-    expect(tracker.summary("m")).toEqual({ count: 0, elite: 0, holding: 0 });
+    expect(tracker.summary("m")).toEqual({ count: 0, elite: 0, holding: 0, conviction: 0 });
     expect(tracker.trackedCount()).toBe(0);
   });
 
@@ -226,5 +227,22 @@ describe("SmartWalletTracker", () => {
     tracker.prune(at(2 * 3_600 + 1));
 
     expect(tracker.trackedCount()).toBe(0);
+  });
+
+  it("stores each wallet's point-in-time style and counts only conviction wallets as conviction (D7)", async () => {
+    const { tracker, saved, stats } = setup();
+    stats.set("flipper", { tokens: 10, wins: 10, netPnlSol: 3, flips: 6 }); // 60%
+    stats.set("mixed", { tokens: 10, wins: 10, netPnlSol: 3, flips: 4 }); // 40%
+    stats.set("steady", { tokens: 10, wins: 10, netPnlSol: 3, flips: 3 }); // 30%
+
+    for (const [index, wallet] of ["flipper", "mixed", "steady", "nobody"].entries()) tracker.tradeRecorded(trade(wallet, "buy", 5 + index));
+    await tracker.rateThrough(at(10));
+
+    expect(tracker.summary("m")).toEqual({ count: 3, elite: 0, holding: 3, conviction: 1 });
+    expect(saved.map(({ entry }) => [entry.wallet, entry.styleAtEntry])).toEqual([
+      ["flipper", "flipper"],
+      ["mixed", "mixed"],
+      ["steady", "conviction"],
+    ]);
   });
 });

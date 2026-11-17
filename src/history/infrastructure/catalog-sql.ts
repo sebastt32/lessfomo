@@ -401,6 +401,7 @@ const SORT_COLUMNS: Readonly<Record<TokenSortField, string>> = {
   peakMarketCapSol: "s.peak_price_sol",
   liquidity: "s.liquidity_sol",
   smartWallets: "w.wallets",
+  convictionWallets: "w.conviction",
 };
 
 const escapeLike = (text: string): string => text.replace(/[\\%_]/g, (character) => `\\${character}`);
@@ -428,6 +429,8 @@ export const tokenListStatements = (dialect: CatalogDialect, query: TokenListQue
     if (query.lifecycle !== null) where.push(`${lifecycle()} = ${params.add(query.lifecycle)}`);
     if (query.minScore !== null) where.push(`s.max_score >= ${params.add(query.minScore, "real")}`);
     if (query.minSmartWallets > 0) where.push(`w.wallets >= ${params.add(query.minSmartWallets, "integer")}`);
+    const minConviction = query.minConvictionWallets ?? 0;
+    if (minConviction > 0) where.push(`w.conviction >= ${params.add(minConviction, "integer")}`);
     if (query.search !== null) {
       const text = escapeLike(query.search.toLowerCase());
       const contains = params.add(`%${text}%`);

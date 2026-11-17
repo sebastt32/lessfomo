@@ -10,7 +10,7 @@ import { LiveFeed } from "../live-feed/application/live-feed.js";
 import { LIVE_FEED } from "../live-feed/live-feed.module.js";
 import { SOL_USD_PRICE } from "../market-price/market-price.module.js";
 import type { NewToken } from "../token-discovery/domain/new-token.js";
-import type { WalletRecord } from "../wallet-reputation/domain/reputation-rules.js";
+import type { WalletRecord, WalletStyle } from "../wallet-reputation/domain/reputation-rules.js";
 import type { SmartWalletEntry } from "../wallet-reputation/domain/wallet-reputation-store.js";
 import { ApiModule } from "./api.module.js";
 import { API_ERROR_REPORTER } from "./http/api-exception.filter.js";
@@ -19,9 +19,12 @@ import { TokenVisibility } from "./token-visibility.js";
 
 /** Base58 addresses of 44 characters. */
 const address = (prefix: string) => `${prefix}${"1".repeat(44 - prefix.length)}`;
-const FOUR = address("Four");
-const FIVE = address("Five");
+/** 2 conviction wallets and 3 flippers (5 smart wallets): hidden. */
+const TWO = address("Two");
+/** 3 conviction wallets: public. */
+const THREE = address("Three");
 const LIVE = address("Live");
+const WALLET = address("Hodr");
 
 const token = (mint: string, detectedAt: Date): NewToken => ({
   mint,
@@ -38,9 +41,10 @@ const token = (mint: string, detectedAt: Date): NewToken => ({
   detectedAt,
 });
 
-const entry = (wallet: string, firstBuyAt: Date): SmartWalletEntry => ({
+const entry = (wallet: string, firstBuyAt: Date, styleAtEntry: WalletStyle = "conviction"): SmartWalletEntry => ({
   wallet,
   tierAtEntry: "good",
+  styleAtEntry,
   firstBuyAt,
   entrySeconds: 10,
   boughtSol: 1,
@@ -58,6 +62,9 @@ const record = (wallet: string): WalletRecord => ({
   netPnlSol: 2,
   avgPnlSol: 0.33,
   medianEntrySeconds: 10,
+  style: "conviction",
+  flipRate: 0,
+  medianHoldSeconds: null,
   lastActiveAt: new Date(),
   updatedAt: new Date(),
 });
@@ -88,20 +95,30 @@ afterEach(async () => {
   app = null;
 });
 
-/** The API with the default config (no PUBLIC_MIN_SMART_WALLETS): FOUR has 4 stored good wallets, FIVE has 5. */
+/** The API with the default config (no PUBLIC_MIN_CONVICTION_WALLETS): TWO and THREE as above; WALLET has a result in each. */
 const start = async () => {
   const now = new Date();
   const config = loadAppConfig({}, now);
   const history = new SqliteHistoryRecorder(":memory:");
-  for (const [mint, wallets] of [
-    [FOUR, 4],
-    [FIVE, 5],
-  ] as const) {
+  const wallets: Record<string, WalletStyle[]> = {
+    [TWO]: ["conviction", "conviction", "flipper", "flipper", "flipper"],
+    [THREE]: ["conviction", "conviction", "conviction"],
+  };
+  for (const [mint, styles] of Object.entries(wallets)) {
     await history.recordToken(token(mint, now));
     await history.recordScreening({ token: token(mint, now), status: "unverified", reason: "test" }, now);
-    for (let i = 0; i < wallets; i += 1) await history.saveSmartWallet(mint, entry(address(`W${i}${mint.slice(0, 2)}`), now));
+    for (const [i, style] of styles.entries()) await history.saveSmartWallet(mint, entry(address(`W${i}${mint.slice(0, 2)}`), now, style));
+    const closedAt = new Date(now.getTime() - 60_000);
+    await history.saveTokenClose({
+      mint,
+      detectedAt: now,
+      closedAt,
+      results: [{ wallet: WALLET, firstBuyAt: now, firstSellAt: null, entrySeconds: 1, boughtSol: 1, soldSol: 2, pnlSol: 1, closedAt }],
+      smartWallets: styles.map((style, i) => entry(address(`W${i}${mint.slice(0, 2)}`), now, style)),
+      outcome: null,
+    });
   }
-  const feed = new LiveFeed(config.api.publicMinSmartWallets);
+  const feed = new LiveFeed(config.api.publicMinConvictionWallets);
   const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] })
     .overrideProvider(LIVE_FEED)
     .useValue(feed)
@@ -139,78 +156,106 @@ const readSse = async (response: Response, until: (text: string) => boolean): Pr
   return text;
 };
 
-describe("public visibility with the default PUBLIC_MIN_SMART_WALLETS (5)", () => {
-  it("answers 404 for a token with 4 smart wallets everywhere and serves the one with 5", async () => {
+const summary = (count: number, conviction: number) => ({ count, elite: 0, holding: count, conviction });
+
+describe("public visibility with the default PUBLIC_MIN_CONVICTION_WALLETS (3)", () => {
+  it("answers 404 everywhere for a token with 2 conviction wallets (and 3 flippers) and serves the one with 3", async () => {
     const { get } = await start();
 
     for (const path of ["", "/candles", "/snapshots", "/smart-wallets"]) {
-      const hidden = await get(`/api/tokens/${FOUR}${path}`);
+      const hidden = await get(`/api/tokens/${TWO}${path}`);
       expect([path, hidden.status, hidden.body.error.code]).toEqual([path, 404, "TOKEN_NOT_FOUND"]);
     }
-    expect((await get(`/api/tokens/${FIVE}`)).status).toBe(200);
-    expect((await get(`/api/tokens/${FIVE}/smart-wallets`)).body.smartWallets).toHaveLength(5);
+    expect((await get(`/api/tokens/${THREE}`)).status).toBe(200);
+    const wallets = (await get(`/api/tokens/${THREE}/smart-wallets`)).body.smartWallets;
+    expect(wallets.map((w: { styleAtEntry: string }) => w.styleAtEntry)).toEqual(["conviction", "conviction", "conviction"]);
+    const walletBody = (await get(`/api/wallets/${WALLET}`)).body;
+    expect(mintsOf(walletBody.results)).toEqual([THREE]);
   });
 
-  it("leaves a token with 4 smart wallets out of lists and treats minSmartWallets=2 as 5", async () => {
+  it("leaves the token with 2 conviction wallets out of lists, treats minConvictionWallets=2 as 3 and keeps minSmartWallets as an extra filter", async () => {
     const { get, visibility } = await start();
 
     const all = await get("/api/tokens");
-    const two = await get("/api/tokens?minSmartWallets=2");
-    const six = await get("/api/tokens?minSmartWallets=6");
+    const two = await get("/api/tokens?minConvictionWallets=2");
+    const four = await get("/api/tokens?minConvictionWallets=4");
+    const fiveSmart = await get("/api/tokens?minSmartWallets=5");
+    const sorted = await get("/api/tokens?sort=convictionWallets:desc");
 
-    expect([all.body.total, mintsOf(all.body.tokens)]).toEqual([1, [FIVE]]);
-    expect([two.body.total, mintsOf(two.body.tokens)]).toEqual([1, [FIVE]]);
-    expect(six.body.total).toBe(0);
-    expect(mintsOf((await get("/api/screenings")).body.screenings)).toEqual([FIVE]);
-    expect(mintsOf((await get("/api/screenings?minSmartWallets=2")).body.screenings)).toEqual([FIVE]);
-    expect((await get("/api/tokens?minSmartWallets=2.5")).body.error).toEqual({
-      code: "INVALID_QUERY",
-      message: 'Invalid query parameter "minSmartWallets": expected an integer',
-    });
-    expect([...(await visibility.publicMints([FOUR, FIVE]))]).toEqual([FIVE]);
+    expect([all.body.total, mintsOf(all.body.tokens)]).toEqual([1, [THREE]]);
+    expect(all.body.tokens[0].smartWallets).toEqual(summary(3, 3));
+    expect([two.body.total, mintsOf(two.body.tokens)]).toEqual([1, [THREE]]);
+    expect(four.body.total).toBe(0);
+    expect(fiveSmart.body.total).toBe(0); // TWO has 5 smart wallets but only 2 conviction ones
+    expect(mintsOf(sorted.body.tokens)).toEqual([THREE]);
+    expect(mintsOf((await get("/api/screenings")).body.screenings)).toEqual([THREE]);
+    expect(mintsOf((await get("/api/screenings?minConvictionWallets=2")).body.screenings)).toEqual([THREE]);
+    expect((await get("/api/screenings?minSmartWallets=4")).body.screenings).toEqual([]);
+    expect((await get("/api/screenings")).body.screenings[0].smartWallets).toEqual(summary(3, 3));
+    for (const path of ["/api/tokens", "/api/movers", "/api/screenings"]) {
+      expect((await get(`${path}?minConvictionWallets=2.5`)).body.error).toEqual({
+        code: "INVALID_QUERY",
+        message: 'Invalid query parameter "minConvictionWallets": expected an integer',
+      });
+    }
+    expect([...(await visibility.publicMints([TWO, THREE]))]).toEqual([THREE]);
+    expect([await visibility.isPublic(TWO), await visibility.isPublic(THREE)]).toEqual([false, true]);
   });
 
-  it("shows a live token only when its 5th good wallet buys", async () => {
+  it("shows a live token only when its 3rd conviction wallet buys; flippers never count", async () => {
     const { feed, get, base } = await start();
     const live = token(LIVE, new Date());
     feed.tokenDetected(live);
     feed.screeningFinished({ token: live, status: "unverified", reason: "test" }, new Date());
-    const buy = (count: number) =>
+    const buy = (count: number, conviction: number, style: WalletStyle) =>
       feed.smartWalletChanged({
         mint: LIVE,
-        smartWallets: { count, elite: 0, holding: count },
-        wallet: { ...entry(address(`Buyer${count}`), new Date()), record: record(address(`Buyer${count}`)) },
+        smartWallets: summary(count, conviction),
+        wallet: { ...entry(address(`Buyer${count}`), new Date(), style), record: record(address(`Buyer${count}`)) },
       });
     const response = await fetch(`${base}/api/stream`);
+    const tokenStream = await fetch(`${base}/api/tokens/${LIVE}/stream`);
 
     setTimeout(() => {
-      for (let count = 1; count <= 4; count += 1) buy(count);
+      buy(1, 1, "conviction");
+      buy(2, 1, "flipper");
+      buy(3, 1, "flipper");
+      buy(4, 1, "flipper");
+      buy(5, 2, "conviction");
       feed.momentumUpdated([momentum(LIVE, 10)], new Date());
-      buy(5);
+      feed.tradeRecorded({ signature: "t1", mint: LIVE, trader: WALLET, side: "buy", solAmount: 1, tokenAmount: 10, priceSol: 0.1, timestamp: new Date() });
+      buy(6, 3, "conviction");
       feed.momentumUpdated([momentum(LIVE, 20)], new Date());
+      feed.tradeRecorded({ signature: "t2", mint: LIVE, trader: WALLET, side: "buy", solAmount: 1, tokenAmount: 10, priceSol: 0.1, timestamp: new Date() });
     }, 20);
     const text = await readSse(response, (t) => (t.match(/event: momentum/g) ?? []).length >= 2);
+    const perToken = await readSse(tokenStream, (t) => t.includes("event: trade"));
 
     const events = [...text.matchAll(/event: (\S+)\ndata: (.*)\n/g)].map(([, name, data]) => [name, JSON.parse(data ?? "null")]);
     expect(events.map(([name]) => name)).toEqual(["status", "momentum", "token", "screening", "smart-wallet", "momentum"]);
     expect(events[1]?.[1].movers).toEqual([]);
-    expect(events[4]?.[1].smartWallets).toEqual({ count: 5, elite: 0, holding: 5 });
+    expect(events[4]?.[1].smartWallets).toEqual(summary(6, 3));
     expect(mintsOf(events[5]?.[1].movers)).toEqual([LIVE]);
+    expect([...perToken.matchAll(/event: trade\ndata: (.*)\n/g)].map(([, data]) => JSON.parse(data ?? "null").signature)).toEqual(["t2"]);
     expect(mintsOf((await get("/api/movers")).body.movers)).toEqual([LIVE]);
-    expect(mintsOf((await get("/api/movers?minSmartWallets=2")).body.movers)).toEqual([LIVE]);
+    expect(mintsOf((await get("/api/movers?minConvictionWallets=2")).body.movers)).toEqual([LIVE]);
+    expect((await get("/api/movers?minConvictionWallets=4")).body.movers).toEqual([]);
+    expect((await get("/api/movers?minSmartWallets=7")).body.movers).toEqual([]);
+    expect((await get(`/api/tokens/${LIVE}/smart-wallets`)).status).toBe(404); // never stored: not a known token
   });
 
-  it("keeps movers with 4 live smart wallets out of /api/movers", async () => {
+  it("keeps movers with 2 live conviction wallets (and many flippers) out of /api/movers and the stream", async () => {
     const { feed, get } = await start();
     feed.tokenDetected(token(LIVE, new Date()));
     feed.smartWalletChanged({
       mint: LIVE,
-      smartWallets: { count: 4, elite: 0, holding: 4 },
-      wallet: { ...entry(address("Buyer4"), new Date()), record: record(address("Buyer4")) },
+      smartWallets: summary(9, 2),
+      wallet: { ...entry(address("Buyer9"), new Date(), "flipper"), record: record(address("Buyer9")) },
     });
     feed.momentumUpdated([momentum(LIVE, 10)], new Date());
 
     expect((await get("/api/movers")).body.movers).toEqual([]);
-    expect((await get("/api/movers?minSmartWallets=2")).body.movers).toEqual([]);
+    expect((await get("/api/movers?minConvictionWallets=0")).body.movers).toEqual([]);
+    expect(feed.isPublic(LIVE)).toBe(false);
   });
 });

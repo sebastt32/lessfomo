@@ -28,7 +28,10 @@ const report = (error: unknown): void => console.error(`[reputation] ${errorMess
         new SmartWalletTracker({
           trackingWindowMs: config.momentum.trackingWindowMs,
           rules: config.walletReputation.rules,
-          statsAtBuys: (buys, excludedMint) => store.statsAtBuys(buys, config.walletReputation.rules.lookbackMs, excludedMint),
+          statsAtBuys: (buys, excludedMint) => {
+            const { lookbackMs, style } = config.walletReputation.rules;
+            return store.statsAtBuys(buys, lookbackMs, excludedMint, style.flipWindowMs);
+          },
           onChange: (change) => feed.smartWalletChanged(change),
           persist: (mint, entry) => {
             try {

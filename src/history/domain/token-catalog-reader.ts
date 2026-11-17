@@ -5,7 +5,7 @@ import type { StoredToken, TokenHistory } from "./history-reader.js";
 
 export type SafetyStatus = TokenHistory["status"];
 export type Lifecycle = "active" | "dead";
-export type TokenSortField = "detectedAt" | "maxScore" | "peakMarketCapSol" | "liquidity" | "smartWallets";
+export type TokenSortField = "detectedAt" | "maxScore" | "peakMarketCapSol" | "liquidity" | "smartWallets" | "convictionWallets";
 
 export interface TokenListQuery {
   /** Inclusive. */
@@ -18,6 +18,8 @@ export interface TokenListQuery {
   readonly minScore: number | null;
   /** Only tokens bought by at least this many good-or-elite wallets (point-in-time tiers); 0 keeps every token. */
   readonly minSmartWallets: number;
+  /** Only tokens with at least this many conviction wallets at entry (decision D7); 0 or absent keeps every token. */
+  readonly minConvictionWallets?: number;
   /** Case-insensitive match on symbol or name, or mint prefix. */
   readonly search: string | null;
   readonly sort: { readonly field: TokenSortField; readonly direction: "asc" | "desc" };

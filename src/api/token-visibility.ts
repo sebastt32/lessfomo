@@ -7,26 +7,32 @@ import type { WalletReputationStore } from "../wallet-reputation/domain/wallet-r
 import { ApiErrors } from "./http/api-error.js";
 
 /**
- * The public API only exposes tokens bought by at least `api.publicMinSmartWallets`
- * (`PUBLIC_MIN_SMART_WALLETS`, default 5) good-or-elite wallets (point-in-time tier at entry):
- * stored counts, or the live count while the token is followed. Internal processes never go
- * through this check and keep using every token.
+ * The public API only exposes tokens bought by at least `api.publicMinConvictionWallets`
+ * (`PUBLIC_MIN_CONVICTION_WALLETS`, default 3) conviction wallets: good-or-elite wallets whose
+ * point-in-time style at entry was conviction (decision D7; flippers and mixed wallets never
+ * count). Stored counts, or the live count while the token is followed. Internal processes never
+ * go through this check and keep using every token.
  */
 @Injectable()
 export class TokenVisibility {
-  private readonly minSmartWallets: number;
+  private readonly minConvictionWallets: number;
 
   constructor(
     @Inject(LIVE_FEED) private readonly feed: LiveFeed,
     @Inject(WALLET_REPUTATION_STORE) private readonly store: WalletReputationStore,
     @Inject(APP_CONFIG) config: AppConfig,
   ) {
-    this.minSmartWallets = config.api.publicMinSmartWallets;
+    this.minConvictionWallets = config.api.publicMinConvictionWallets;
+  }
+
+  /** Conviction wallets a token needs to be public. */
+  get minimum(): number {
+    return this.minConvictionWallets;
   }
 
   async isPublic(mint: string): Promise<boolean> {
-    if (this.feed.smartWalletsOf(mint).count >= this.minSmartWallets) return true;
-    return (await this.store.tokenSmartSummary(mint)).count >= this.minSmartWallets;
+    if (this.feed.smartWalletsOf(mint).conviction >= this.minConvictionWallets) return true;
+    return (await this.store.tokenSmartSummary(mint)).conviction >= this.minConvictionWallets;
   }
 
   /** Answers 404 TOKEN_NOT_FOUND for a token that does not qualify, exactly as if it did not exist. */
@@ -37,8 +43,8 @@ export class TokenVisibility {
   async publicMints(mints: readonly string[]): Promise<Set<string>> {
     const unique = [...new Set(mints)];
     if (unique.length === 0) return new Set();
-    const stored = await this.store.mintsWithSmartWallets(unique, this.minSmartWallets);
-    for (const mint of unique) if (this.feed.smartWalletsOf(mint).count >= this.minSmartWallets) stored.add(mint);
+    const stored = await this.store.mintsWithConvictionWallets(unique, this.minConvictionWallets);
+    for (const mint of unique) if (this.feed.smartWalletsOf(mint).conviction >= this.minConvictionWallets) stored.add(mint);
     return stored;
   }
 }

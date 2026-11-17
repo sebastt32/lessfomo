@@ -75,13 +75,13 @@ const screening: StoredScreening = {
   totalHolders: 3,
   evaluatedAt: new Date("2026-11-13T20:02:00.000Z"),
   detectedAt: new Date("2026-11-13T20:01:00.000Z"),
-  smartWallets: { count: 2, elite: 1, holding: 1 },
+  smartWallets: { count: 2, elite: 1, holding: 1, conviction: 1 },
 };
 const SCREENING_VIEW = { ...screening, evaluatedAt: "2026-11-13T20:02:00.000Z", detectedAt: "2026-11-13T20:01:00.000Z" };
 const UNKNOWN_LIQUIDITY = { sol: null, bondingCurvePct: null, migrated: false };
-const SMART = { count: 1, elite: 0, holding: 1 };
+const SMART = { count: 1, elite: 0, holding: 1, conviction: 1 };
 
-/** A good wallet buys the token live: from then on it is public (docs/API.md "Public visibility rule"). */
+/** A conviction wallet buys the token live: from then on it is public (docs/API.md "Public visibility rule"). */
 const qualify = (feed: LiveFeed, mint = MINT): void =>
   feed.smartWalletChanged({
     mint,
@@ -89,6 +89,7 @@ const qualify = (feed: LiveFeed, mint = MINT): void =>
     wallet: {
       wallet: "goodWallet",
       tierAtEntry: "good",
+      styleAtEntry: "conviction",
       firstBuyAt: new Date("2026-11-13T20:01:30.000Z"),
       entrySeconds: 30,
       boughtSol: 1,
@@ -201,9 +202,12 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
   publicMints = new Set([MINT]);
   async tokenSmartSummary(mint: string) {
     if (this.fail) throw new Error("disk on fire");
-    return this.publicMints.has(mint) ? { count: 2, elite: 1, holding: 1 } : { count: 0, elite: 0, holding: 0 };
+    return this.publicMints.has(mint) ? { count: 2, elite: 1, holding: 1, conviction: 1 } : { count: 0, elite: 0, holding: 0, conviction: 0 };
   }
   async mintsWithSmartWallets(mints: readonly string[]) {
+    return new Set(mints.filter((mint) => this.publicMints.has(mint)));
+  }
+  async mintsWithConvictionWallets(mints: readonly string[]) {
     return new Set(mints.filter((mint) => this.publicMints.has(mint)));
   }
   closed = false;
@@ -212,10 +216,12 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
   chartRequests: { mint: string; intervalSeconds: number; limit: number }[] = [];
   fail = false;
   screeningMinimums: (number | undefined)[] = [];
-  async recentScreenings(limit: number, minSmartWallets?: number): Promise<StoredScreening[]> {
+  screeningConvictionMinimums: (number | undefined)[] = [];
+  async recentScreenings(limit: number, minSmartWallets?: number, minConvictionWallets?: number): Promise<StoredScreening[]> {
     if (this.fail) throw new Error("disk on fire");
     this.requestedLimits.push(limit);
     this.screeningMinimums.push(minSmartWallets);
+    this.screeningConvictionMinimums.push(minConvictionWallets);
     return [screening];
   }
   async tokenHistory(mint: string): Promise<TokenHistory | null> {
@@ -259,7 +265,7 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
           holders: 61,
           lastTradeAt: new Date("2026-11-13T20:30:00.000Z"),
           snapshotCount: 5,
-          smartWallets: { count: 3, elite: 1, holding: 2 },
+          smartWallets: { count: 3, elite: 1, holding: 2, conviction: 2 },
         },
       ],
     };
@@ -280,7 +286,8 @@ class FakeHistory implements HistoryReader, TokenCatalogReader {
 let app: INestApplication | null = null;
 
 const configWith = (overrides: { heartbeatMs?: number }): AppConfig => {
-  const config = loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, STARTED_AT);
+  // These tests keep the old "one smart wallet" setting as one conviction wallet (D7 replaced the rule).
+  const config = loadAppConfig({ PUBLIC_MIN_CONVICTION_WALLETS: "1" }, STARTED_AT);
   return { ...config, api: { ...config.api, ...overrides } };
 };
 
@@ -790,18 +797,35 @@ describe("API (Nest e2e)", () => {
       expect((await fetch(`${base}/api/stats`)).status).toBe(200);
     });
 
-    it("lists only tokens, screenings and movers with at least one good wallet, whatever minSmartWallets says", async () => {
+    // Updated for D7: the visibility floor moved from minSmartWallets to minConvictionWallets.
+    it("lists only tokens, screenings and movers with at least one conviction wallet, whatever minConvictionWallets says", async () => {
       const { feed, history, base } = await start();
       feed.tokenDetected(token);
       feed.momentumUpdated([snapshot], snapshot.at);
 
-      expect((await (await fetch(`${base}/api/movers?minSmartWallets=0`)).json()).movers).toEqual([]);
+      expect((await (await fetch(`${base}/api/movers?minConvictionWallets=0`)).json()).movers).toEqual([]);
       await fetch(`${base}/api/tokens`);
-      await fetch(`${base}/api/tokens?minSmartWallets=0`);
-      await fetch(`${base}/api/tokens?minSmartWallets=3`);
-      expect(history.listQueries.map((q) => q.minSmartWallets)).toEqual([1, 1, 3]);
-      await fetch(`${base}/api/screenings?minSmartWallets=0`);
-      expect(history.screeningMinimums).toEqual([1]);
+      await fetch(`${base}/api/tokens?minConvictionWallets=0`);
+      await fetch(`${base}/api/tokens?minConvictionWallets=3`);
+      await fetch(`${base}/api/tokens?minSmartWallets=4`);
+      expect(history.listQueries.map((q) => [q.minConvictionWallets, q.minSmartWallets])).toEqual([
+        [1, 0],
+        [1, 0],
+        [3, 0],
+        [1, 4],
+      ]);
+      await fetch(`${base}/api/screenings?minConvictionWallets=0`);
+      await fetch(`${base}/api/screenings?minConvictionWallets=2&minSmartWallets=5`);
+      expect([history.screeningConvictionMinimums, history.screeningMinimums]).toEqual([
+        [1, 2],
+        [0, 5],
+      ]);
+      expect((await fetch(`${base}/api/movers?minConvictionWallets=1.5`)).status).toBe(400);
+      expect((await fetch(`${base}/api/screenings?minConvictionWallets=x`)).status).toBe(400);
+      expect((await (await fetch(`${base}/api/tokens?minConvictionWallets=two`)).json()).error).toEqual({
+        code: "INVALID_QUERY",
+        message: 'Invalid query parameter "minConvictionWallets": expected an integer',
+      });
     });
   });
 
@@ -835,7 +859,7 @@ describe("API (Nest e2e)", () => {
             holders: 61,
             lastTradeAt: "2026-11-13T20:30:00.000Z",
             snapshotCount: 5,
-            smartWallets: { count: 3, elite: 1, holding: 2 },
+            smartWallets: { count: 3, elite: 1, holding: 2, conviction: 2 },
           },
         ],
         page: 1,

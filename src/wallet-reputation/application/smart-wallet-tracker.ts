@@ -1,6 +1,6 @@
 import type { Trade } from "../../momentum/domain/trade.js";
 import { NO_STATS, round2, roundSol, type ReputationStats } from "../domain/closed-result.js";
-import { tierOf, type ReputationRules, type WalletRecord, type WalletTier } from "../domain/reputation-rules.js";
+import { styleOf, tierOf, type ReputationRules, type WalletRecord, type WalletStyle, type WalletTier } from "../domain/reputation-rules.js";
 import { applyTrade, isHolding, type WalletPosition } from "../domain/wallet-positions.js";
 import {
   NO_SMART_WALLETS,
@@ -42,6 +42,7 @@ export interface SmartTrackedToken {
 
 interface SmartPosition {
   readonly tier: Exclude<WalletTier, "none">;
+  readonly style: WalletStyle;
   /** Record when it was rated, used if the current one was dropped since. */
   readonly record: WalletRecord;
   position: WalletPosition;
@@ -59,7 +60,7 @@ interface TokenState {
 }
 
 /** Describes a wallet without a stored record by its stats at the buy. */
-const recordAtBuy = (address: string, tier: WalletTier, stats: ReputationStats, at: Date): WalletRecord => ({
+const recordAtBuy = (address: string, tier: WalletTier, style: WalletStyle, stats: ReputationStats, at: Date): WalletRecord => ({
   address,
   tier,
   isBot: false,
@@ -69,6 +70,9 @@ const recordAtBuy = (address: string, tier: WalletTier, stats: ReputationStats, 
   netPnlSol: stats.netPnlSol,
   avgPnlSol: stats.tokens === 0 ? 0 : roundSol(stats.netPnlSol / stats.tokens),
   medianEntrySeconds: null,
+  style,
+  flipRate: stats.tokens === 0 ? null : round2((stats.flips / stats.tokens) * 100),
+  medianHoldSeconds: null,
   lastActiveAt: null,
   updatedAt: at,
 });
@@ -160,11 +164,13 @@ export class SmartWalletTracker {
     if (state === undefined) return NO_SMART_WALLETS;
     let elite = 0;
     let holding = 0;
-    for (const { tier, position } of state.smart.values()) {
+    let conviction = 0;
+    for (const { tier, style, position } of state.smart.values()) {
       if (tier === "elite") elite += 1;
       if (isHolding(position)) holding += 1;
+      if (style === "conviction") conviction += 1;
     }
-    return { count: state.smart.size, elite, holding };
+    return { count: state.smart.size, elite, holding, conviction };
   }
 
   /** Forgets tokens whose window ended and whose first buys are all rated (or one more window later). */
@@ -190,17 +196,20 @@ export class SmartWalletTracker {
     state.pending.delete(wallet);
     const tier = tierOf(stats, this.options.rules);
     if (tier === "none") return;
-    const record = this.records.get(wallet) ?? recordAtBuy(wallet, tier, stats, at);
-    const entry: SmartPosition = { tier, record, position };
+    // Same point-in-time stats as the close, so live and stored styles agree by construction (D7).
+    const style = styleOf(stats, this.options.rules);
+    const record = this.records.get(wallet) ?? recordAtBuy(wallet, tier, style, stats, at);
+    const entry: SmartPosition = { tier, style, record, position };
     state.smart.set(wallet, entry);
     this.changed(mint, state, wallet, entry, true);
   }
 
   private changed(mint: string, state: TokenState, wallet: string, smart: SmartPosition, notify: boolean): void {
-    const { position, tier } = smart;
+    const { position, tier, style } = smart;
     const entry: SmartWalletEntry = {
       wallet,
       tierAtEntry: tier,
+      styleAtEntry: style,
       firstBuyAt: position.firstBuyAt,
       entrySeconds: Math.max(0, position.firstBuyAt.getTime() - state.detectedAt.getTime()) / 1000,
       boughtSol: roundSol(position.boughtSol),

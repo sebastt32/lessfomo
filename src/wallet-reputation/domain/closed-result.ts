@@ -5,6 +5,8 @@
 export interface ClosedResult {
   readonly mint: string;
   readonly firstBuyAt: Date;
+  /** First sell after the first buy and before `closedAt` (decision D7); null when it never sold in the window. */
+  readonly firstSellAt: Date | null;
   /** Seconds from the token's creation to the wallet's first buy. */
   readonly entrySeconds: number;
   readonly boughtSol: number;
@@ -19,9 +21,11 @@ export interface ReputationStats {
   readonly tokens: number;
   readonly wins: number;
   readonly netPnlSol: number;
+  /** Tokens first sold within the flip window of the first buy (decision D7). */
+  readonly flips: number;
 }
 
-export const NO_STATS: ReputationStats = { tokens: 0, wins: 0, netPnlSol: 0 };
+export const NO_STATS: ReputationStats = { tokens: 0, wins: 0, netPnlSol: 0, flips: 0 };
 
 /** Rounds SOL amounts so float noise never changes what is stored or compared. */
 export const roundSol = (value: number): number => Math.round(value * 1e9) / 1e9;

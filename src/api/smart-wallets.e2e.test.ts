@@ -73,7 +73,8 @@ const start = async () => {
     await history.recordToken(token(mint, detectedAt));
     await history.recordTrade(trade(mint, DEV, "buy", detectedAt, 1, 1000));
     await history.recordTrade(trade(mint, SMART, "buy", buyAt, 1, 1000));
-    await history.recordTrade(trade(mint, SMART, "sell", buyAt + MINUTE, 2, 1000));
+    // Held 5 minutes, so SMART is a conviction wallet (D7: a flip is a sell within 2 minutes).
+    await history.recordTrade(trade(mint, SMART, "sell", buyAt + 5 * MINUTE, 2, 1000));
   };
   for (let i = 0; i < 5; i += 1) await winning(address(`Win${i + 2}`), t0 + i * 10 * MINUTE, t0 + i * 10 * MINUTE + MINUTE);
   await winning(EARLY, t0 + 30 * MINUTE, t0 + 35 * MINUTE);
@@ -88,7 +89,8 @@ const start = async () => {
   await new ReputationCloser({ store: history, rules: DEFAULT_REPUTATION_RULES, trackingWindowMs: HOUR, batchSize: 100 }).tick();
 
   const feed = new LiveFeed(1);
-  const config = loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, new Date(now));
+  // The old "one smart wallet" setting of these tests is now one conviction wallet (D7).
+  const config = loadAppConfig({ PUBLIC_MIN_CONVICTION_WALLETS: "1" }, new Date(now));
   const moduleRef = await Test.createTestingModule({ imports: [ConfigModule.forRoot(config), ApiModule] })
     .overrideProvider(LIVE_FEED)
     .useValue(feed)
@@ -137,7 +139,7 @@ describe("smart wallets API", () => {
     expect((await get("/api/tokens?minSmartWallets=2")).body.total).toBe(0);
     expect(smart.body.total).toBe(1);
     expect(smart.body.tokens.map((t: { token: { mint: string }; smartWallets: unknown }) => [t.token.mint, t.smartWallets])).toEqual([
-      [X, { count: 1, elite: 0, holding: 1 }],
+      [X, { count: 1, elite: 0, holding: 1, conviction: 1 }],
     ]);
     expect(sorted.body.tokens[0].token.mint).toBe(X);
     expect((await get("/api/tokens?minSmartWallets=-1")).body.total).toBe(1);
@@ -151,10 +153,10 @@ describe("smart wallets API", () => {
     const smart = await get("/api/screenings?minSmartWallets=1");
 
     expect(all.body.screenings.map((s: { mint: string; smartWallets: unknown }) => [s.mint, s.smartWallets])).toEqual([
-      [X, { count: 1, elite: 0, holding: 1 }],
+      [X, { count: 1, elite: 0, holding: 1, conviction: 1 }],
     ]);
     expect(smart.body.screenings.map((s: { mint: string }) => s.mint)).toEqual([X]);
-    expect((await get(`/api/tokens/${X}`)).body.screenings[0].smartWallets).toEqual({ count: 1, elite: 0, holding: 1 });
+    expect((await get(`/api/tokens/${X}`)).body.screenings[0].smartWallets).toEqual({ count: 1, elite: 0, holding: 1, conviction: 1 });
     expect((await get("/api/screenings?minSmartWallets=x")).status).toBe(400);
   });
 
@@ -170,7 +172,19 @@ describe("smart wallets API", () => {
         {
           address: SMART,
           tierAtEntry: "good",
-          record: expect.objectContaining({ address: SMART, tier: "good", isBot: false, tokens: 7, wins: 7, winRate: 100, netPnlSol: 7.5 }),
+          styleAtEntry: "conviction",
+          record: expect.objectContaining({
+            address: SMART,
+            tier: "good",
+            isBot: false,
+            tokens: 7,
+            wins: 7,
+            winRate: 100,
+            netPnlSol: 7.5,
+            style: "conviction",
+            flipRate: 0,
+            medianHoldSeconds: 300, // X and the sixth token were never sold before their close
+          }),
           firstBuyAt: new Date(xAt + MINUTE).toISOString(),
           entrySeconds: 60,
           boughtSol: 1,
@@ -227,6 +241,7 @@ describe("smart wallets API", () => {
 
     expect(status).toBe(200);
     expect(body.from).toBe(new Date(t0).toISOString());
+    expect(body.by).toBe("smartWallets");
     expect(body.costRoundTrip).toBe(0.03);
     expect(body.buckets.map((b: { smartWallets: string; tokens: number }) => [b.smartWallets, b.tokens])).toEqual([
       ["0", 1],
@@ -248,6 +263,41 @@ describe("smart wallets API", () => {
       medianPeakX: 2.5,
     });
     expect((await get("/api/analysis/smart-wallets?from=yesterday")).body.error.code).toBe("INVALID_QUERY");
+  });
+
+  it("analyzes success per number of conviction wallets with by=conviction", async () => {
+    const { get, t0 } = await start();
+    const from = new Date(t0).toISOString();
+
+    const { status, body } = await get(`/api/analysis/smart-wallets?from=${from}&by=conviction`);
+
+    expect(status).toBe(200);
+    expect(Object.keys(body)).toEqual(["from", "to", "by", "costRoundTrip", "buckets"]);
+    expect(body.by).toBe("conviction");
+    // X: SMART had the conviction style at its buy, so X is in bucket 1 entered at that buy; EARLY (no smart wallet) is in 0.
+    expect(body.buckets.map((b: { convictionWallets: string; tokens: number }) => [b.convictionWallets, b.tokens])).toEqual([
+      ["0", 1],
+      ["1", 1],
+      ["2", 0],
+      ["3", 0],
+      ["4", 0],
+      ["5+", 0],
+    ]);
+    expect(body.buckets[1]).toEqual({
+      convictionWallets: "1",
+      tokens: 1,
+      reached2xPct: 100,
+      migratedPct: 0,
+      avgReturnPct: 97,
+      medianReturnPct: 97,
+      winnersPct: 100,
+      medianPeakX: 2.5,
+    });
+    expect((await get(`/api/analysis/smart-wallets?from=${from}&by=smartWallets`)).body.buckets[1].smartWallets).toBe("1");
+    expect((await get(`/api/analysis/smart-wallets?by=tier`)).body.error).toEqual({
+      code: "INVALID_QUERY",
+      message: 'Invalid query parameter "by": expected smartWallets or conviction',
+    });
   });
 
   it("filters movers by their live smart wallets and streams smart-wallet events", async () => {
@@ -286,6 +336,9 @@ describe("smart wallets API", () => {
       netPnlSol: 7,
       avgPnlSol: 0.7,
       medianEntrySeconds: 30,
+      style: "conviction",
+      flipRate: 10,
+      medianHoldSeconds: 600,
       lastActiveAt: new Date("2026-11-16T10:00:00.000Z"),
       updatedAt: new Date("2026-11-16T11:00:00.000Z"),
     };
@@ -293,10 +346,11 @@ describe("smart wallets API", () => {
     setTimeout(() => {
       feed.smartWalletChanged({
         mint: live.mint,
-        smartWallets: { count: 1, elite: 1, holding: 1 },
+        smartWallets: { count: 1, elite: 1, holding: 1, conviction: 1 },
         wallet: {
           wallet: SMART,
           tierAtEntry: "elite",
+          styleAtEntry: "conviction",
           firstBuyAt: new Date("2026-11-16T12:00:05.000Z"),
           entrySeconds: 5,
           boughtSol: 0.5,
@@ -312,10 +366,11 @@ describe("smart wallets API", () => {
 
     expect(JSON.parse(/event: smart-wallet\ndata: (.*)\n/.exec(text)?.[1] ?? "null")).toEqual({
       mint: live.mint,
-      smartWallets: { count: 1, elite: 1, holding: 1 },
+      smartWallets: { count: 1, elite: 1, holding: 1, conviction: 1 },
       wallet: {
         address: SMART,
         tierAtEntry: "elite",
+        styleAtEntry: "conviction",
         record: {
           address: SMART,
           tier: "elite",
@@ -326,6 +381,9 @@ describe("smart wallets API", () => {
           netPnlSol: 7,
           avgPnlSol: 0.7,
           medianEntrySeconds: 30,
+          style: "conviction",
+          flipRate: 10,
+          medianHoldSeconds: 600,
           lastActiveAt: "2026-11-16T10:00:00.000Z",
           updatedAt: "2026-11-16T11:00:00.000Z",
         },
@@ -340,11 +398,12 @@ describe("smart wallets API", () => {
       count: 1,
       elite: 1,
       holding: 1,
+      conviction: 1,
     });
     const movers = (await get("/api/movers")).body.movers;
     const smartMovers = (await get("/api/movers?minSmartWallets=1")).body.movers;
     expect(movers.map((m: { mint: string; smartWallets: unknown }) => [m.mint, m.smartWallets])).toEqual([
-      [live.mint, { count: 1, elite: 1, holding: 1 }],
+      [live.mint, { count: 1, elite: 1, holding: 1, conviction: 1 }],
     ]);
     expect(smartMovers.map((m: { mint: string }) => m.mint)).toEqual([live.mint]);
     expect((await get("/api/movers?minSmartWallets=1.5")).body.error.code).toBe("INVALID_QUERY");

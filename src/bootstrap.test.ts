@@ -92,9 +92,9 @@ class FakeHistory {
   updateMarkets = async (): Promise<void> => undefined;
   smartWallets: string[] = [];
   saveSmartWallet = async (mint: string, entry: { wallet: string }): Promise<void> => void this.smartWallets.push(`${mint}:${entry.wallet}`);
-  /** "fan" has good point-in-time stats at every buy. */
+  /** "fan" has good point-in-time stats at every buy and never flipped (conviction, D7). */
   statsAtBuys = async (buys: readonly { wallet: string }[]) =>
-    new Map(buys.filter(({ wallet }) => wallet === "fan").map(({ wallet }) => [wallet, { tokens: 5, wins: 4, netPnlSol: 2 }] as const));
+    new Map(buys.filter(({ wallet }) => wallet === "fan").map(({ wallet }) => [wallet, { tokens: 5, wins: 4, netPnlSol: 2, flips: 0 }] as const));
   close = async (): Promise<void> => {
     this.onClose();
     events.push("history.close");
@@ -102,7 +102,7 @@ class FakeHistory {
 }
 
 const testConfig = (port: number): AppConfig => {
-  const config = loadAppConfig({ API_PORT: String(port), PUBLIC_MIN_SMART_WALLETS: "1" }, new Date("2026-11-13T20:00:00.000Z"));
+  const config = loadAppConfig({ API_PORT: String(port), PUBLIC_MIN_CONVICTION_WALLETS: "1" }, new Date("2026-11-13T20:00:00.000Z"));
   return {
     ...config,
     api: { ...config.api, port },
@@ -217,7 +217,7 @@ describe("lessfomo app wiring", () => {
     expect(logs).toContain("[momentum] tracking 1 token(s), 1 trade(s) buffered, 1 active");
     const movers = await (await fetch(`http://127.0.0.1:${port}/api/movers`)).json();
     // "fan" is a good wallet: its buy makes the token public, counted live and stored.
-    expect(movers.movers[0]).toMatchObject({ mint: MINT, status: "unverified", smartWallets: { count: 1, elite: 0, holding: 1 } });
+    expect(movers.movers[0]).toMatchObject({ mint: MINT, status: "unverified", smartWallets: { count: 1, elite: 0, holding: 1, conviction: 1 } });
     expect(history.smartWallets).toEqual([`${MINT}:fan`]);
   });
 

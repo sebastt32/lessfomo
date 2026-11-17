@@ -9,6 +9,8 @@ export interface WalletPosition {
   readonly firstBuyAt: Date;
   /** Index of the first buy in the token's ordered trades. */
   readonly firstBuyIndex: number;
+  /** First sell after the first buy, among the trades folded so far; null while it never sold. */
+  readonly firstSellAt: Date | null;
   readonly boughtSol: number;
   readonly soldSol: number;
   readonly boughtTokens: number;
@@ -30,6 +32,7 @@ export const applyTrade = (
       wallet: trade.trader,
       firstBuyAt: trade.timestamp,
       firstBuyIndex: index,
+      firstSellAt: null,
       boughtSol: trade.solAmount,
       soldSol: 0,
       boughtTokens: trade.tokenAmount,
@@ -38,7 +41,12 @@ export const applyTrade = (
   }
   return trade.side === "buy"
     ? { ...position, boughtSol: position.boughtSol + trade.solAmount, boughtTokens: position.boughtTokens + trade.tokenAmount }
-    : { ...position, soldSol: position.soldSol + trade.solAmount, soldTokens: position.soldTokens + trade.tokenAmount };
+    : {
+        ...position,
+        firstSellAt: position.firstSellAt ?? trade.timestamp,
+        soldSol: position.soldSol + trade.solAmount,
+        soldTokens: position.soldTokens + trade.tokenAmount,
+      };
 };
 
 /** Tokens still held per observed trades (decision D3). */
@@ -93,6 +101,8 @@ export const closeTokenResults = (
   const results = [...positions.values()].map((position) => ({
     wallet: position.wallet,
     firstBuyAt: position.firstBuyAt,
+    // Only trades before the close are folded, so a sell after it never counts (decision D7).
+    firstSellAt: position.firstSellAt,
     entrySeconds: Math.max(0, position.firstBuyAt.getTime() - token.detectedAt.getTime()) / 1000,
     boughtSol: roundSol(position.boughtSol),
     soldSol: roundSol(position.soldSol),

@@ -219,9 +219,11 @@ interface SmartWalletInToken {
 }
 ```
 
-`Mover`, `TokenListItem` and `ScreeningView` gain `smartWallets: { count: number; elite: number; holding: number }`
-(good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding) and a new
-`conviction: number` (of those, how many had the conviction style at entry).
+`Mover`, `TokenListItem` and `ScreeningView` gain
+`smartWallets: { count: number; elite: number; holding: number; conviction: number }`
+(good-or-elite wallets, by tier at entry, that bought the token; `holding` = still holding;
+`conviction` = of those, how many had the conviction style at entry). The same object is sent in
+the `smart-wallet` event.
 
 ## Endpoints
 
@@ -313,7 +315,7 @@ Flippers and mixed wallets are shown in token details but never make a token pub
 `/api/tokens/:mint/stream`, and the `token`, `screening`, `momentum` and `smart-wallet` events on
 `/api/stream`. A token that does not qualify answers `404 TOKEN_NOT_FOUND` exactly as if it did not
 exist, and is never included in lists or events. A token becomes visible as soon as it qualifies
-(e.g. its 5th good wallet buys it in minute 3); its per-token stream sends nothing until then.
+(e.g. its 3rd conviction wallet buys it in minute 3); its per-token stream sends nothing until then.
 `/api/wallets/:address` only lists results of qualifying tokens. `/api/stats` and
 `/api/analysis/smart-wallets` remain aggregate-only and are computed over all stored data; they
 never reveal individual non-qualifying tokens. Internal processes (reputation, snapshots, analysis)
@@ -321,16 +323,18 @@ keep using every stored token.
 
 ### Smart-wallet filters
 
-`GET /api/tokens` and `GET /api/movers` accept `minSmartWallets` (an integer, default
-`PUBLIC_MIN_SMART_WALLETS` (5); integers below it are treated as it because of the visibility rule;
-non-integers → `400 INVALID_QUERY`) and
-`/api/tokens` also accepts `sort=smartWallets:desc`. `GET /api/screenings` accepts `minSmartWallets`
-too. Invalid values → `400 INVALID_QUERY`. Live SSE events are unchanged; clients filter `momentum`
-movers by `smartWallets.count`, and a new SSE event on `/api/stream` reports changes:
+`GET /api/tokens`, `GET /api/movers` and `GET /api/screenings` accept `minConvictionWallets` (an
+integer, default `PUBLIC_MIN_CONVICTION_WALLETS` (3); integers below it are treated as it because of
+the visibility rule; non-integers → `400 INVALID_QUERY`). `minSmartWallets` is still accepted as an
+additional filter on good-or-elite wallets (an integer, default `0` = no filter, negative values
+count as `0`; non-integers → `400 INVALID_QUERY`); it is no longer a visibility rule.
+`/api/tokens` also accepts `sort=convictionWallets:desc` and `sort=smartWallets:desc`. Live SSE
+events are unchanged; clients filter `momentum` movers by `smartWallets.conviction`, and a new SSE
+event on `/api/stream` reports changes:
 
 | Event | `data` | When |
 | --- | --- | --- |
-| `smart-wallet` | `{ "mint": string, "smartWallets": { count, elite, holding }, "wallet": SmartWalletInToken }` | A good-or-elite wallet buys or fully sells a token |
+| `smart-wallet` | `{ "mint": string, "smartWallets": { count, elite, holding, conviction }, "wallet": SmartWalletInToken }` | A good-or-elite wallet buys or fully sells a token |
 
 ### `GET /api/tokens/:mint/smart-wallets`
 
@@ -346,16 +350,29 @@ Same `400 INVALID_MINT`-style validation for the address (code `INVALID_ADDRESS`
 { "record": WalletRecord, "results": [WalletTokenResult] }   // newest first, last 7 days, max 200
 ```
 
-### `GET /api/analysis/smart-wallets?from=&to=`
+### `GET /api/analysis/smart-wallets?from=&to=&by=`
 
 How success changes with the number of good-or-elite wallets (point-in-time tiers) that bought a
 token within its live window. Buckets `0`, `1`, `2`, `3`, `4`, `5+`. Entry for each token in a bucket
 is the price right after the k-th smart wallet's first buy (k = bucket size, `0` = the token's
 safety-check time), exits at 2× or after 10 minutes, with a 3% round-trip cost.
 
+`by` is `smartWallets` (default) or `conviction`; any other value → `400 INVALID_QUERY`. Every
+response echoes `by`. With `by=conviction` tokens are bucketed by their conviction wallets at entry
+(good-or-elite wallets whose point-in-time style at entry was `conviction`), the entry is the price
+right after the k-th conviction wallet's first buy (`0` = the safety-check time), and each bucket
+uses the key `convictionWallets` instead of `smartWallets` (same statistics fields).
+
 ```json
-{ "from": string, "to": string, "costRoundTrip": 0.03,
+{ "from": string, "to": string, "by": "smartWallets", "costRoundTrip": 0.03,
   "buckets": [ { "smartWallets": "0", "tokens": 1234,
+                 "reached2xPct": 3.1, "migratedPct": 0.4, "avgReturnPct": -4.2, "medianReturnPct": -6.0,
+                 "winnersPct": 12.5, "medianPeakX": 1.1 } ] }
+```
+
+```json
+{ "from": string, "to": string, "by": "conviction", "costRoundTrip": 0.03,
+  "buckets": [ { "convictionWallets": "0", "tokens": 1234,
                  "reached2xPct": 3.1, "migratedPct": 0.4, "avgReturnPct": -4.2, "medianReturnPct": -6.0,
                  "winnersPct": 12.5, "medianPeakX": 1.1 } ] }
 ```

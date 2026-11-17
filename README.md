@@ -46,7 +46,7 @@ All variables are optional.
 | `EVALUATION_DELAY_MS` | `60000` | Wait after a token is created before checking it |
 | `MIN_INTERVAL_MS` | `4000` | Minimum time between checks (RugCheck allows ~15 requests per window) |
 | `MAX_PENDING` | `50` | Tokens waiting to be checked; the oldest are skipped first |
-| `PUBLIC_MIN_SMART_WALLETS` | `5` | Good-or-elite wallets a token needs to be shown by the public API (positive integer; invalid values use `5`) |
+| `PUBLIC_MIN_CONVICTION_WALLETS` | `3` | Conviction wallets (at entry) a token needs to be shown by the public API (positive integer; invalid values use `3`). Replaces `PUBLIC_MIN_SMART_WALLETS`, which is no longer read |
 
 ## Safety checks
 
@@ -152,25 +152,45 @@ Only trades from its first buy on count; the token's creator never gets a result
 `isBot` flags a wallet that first-buys 20 or more distinct tokens per active hour on average. It is
 shown, not used to rate. The thresholds live in `walletReputation.rules` of `src/config/app-config.ts`.
 
+**Style (hold time).** When a token closes, each wallet's result also keeps its first sell before
+the close (sells after it never count). Its hold time is first sell minus first buy; a **flip** is a
+token sold within 120 seconds of the first buy (never sold = not a flip). From the same prior
+results as the tier, a good-or-elite wallet's style is:
+
+| Style | Flip rate |
+| --- | --- |
+| `conviction` | ≤ 30% |
+| `mixed` | between |
+| `flipper` | ≥ 60% |
+| `unrated` | tier `none` |
+
+The window and thresholds live in `walletReputation.rules.style`. The style at a wallet's first buy
+of a token is point in time like the tier, fixed for that token, and counted in
+`smartWallets.conviction`; records also show the current `style`, `flipRate` and `medianHoldSeconds`.
+
 **Point in time, no look-ahead.** A wallet's tier when it buys a token comes only from results that
 closed strictly before that buy (and within the 7 days before it). Tokens close oldest first, so
-every result that can rate a buy is stored before that buy is rated. The tier a wallet had at its
+every result that can rate a buy is stored before that buy is rated. The tier (and style) a wallet had at its
 first buy of a token is fixed for that token. Filters, counts and the analysis all use these tiers;
 `GET /api/wallets/:address` shows the current record (last 7 days before now).
 
 **Live.** Good and elite wallets are kept in memory. On every stored trade of a tracked token, a
 good or elite wallet's first buy (never the creator's) is counted in the token's
-`smartWallets { count, elite, holding }`; `holding` drops when its observed balance reaches zero.
+`smartWallets { count, elite, holding, conviction }`; `holding` drops when its observed balance
+reaches zero. Live buys are rated with the same stored point-in-time stats as the close, so live and
+stored tiers and styles agree.
 Changes are stored per token and pushed as `smart-wallet` events on `/api/stream`. When the token
 closes, its smart wallets are recomputed with the exact point-in-time tiers.
 
 **Public visibility.** The public API only exposes tokens bought by at least
-`PUBLIC_MIN_SMART_WALLETS` (default 5) good-or-elite wallets (tier at entry). Lists (`/api/tokens`,
-`/api/screenings`, `/api/movers`) leave the others out (`minSmartWallets` defaults to that minimum,
-lower values count as it); their detail, candles, snapshots
+`PUBLIC_MIN_CONVICTION_WALLETS` (default 3) conviction wallets (style at entry). Flippers and mixed
+wallets are shown in a token's details but never make it public. Lists (`/api/tokens`,
+`/api/screenings`, `/api/movers`) leave the others out (`minConvictionWallets` defaults to that
+minimum, lower values count as it; `minSmartWallets` is still accepted as an extra filter on
+good-or-elite wallets); their detail, candles, snapshots
 and smart wallets answer `404 TOKEN_NOT_FOUND` as if they did not exist; `/api/stream` skips their
 events and announces a token (`token`, then its latest `screening`) the moment it reaches that
-many smart wallets; `/api/tokens/:mint/stream` sends nothing until then. `/api/wallets/:address` lists only
+many conviction wallets; `/api/tokens/:mint/stream` sends nothing until then. `/api/wallets/:address` lists only
 results in public tokens, although the record rates all of them. `/api/stats` and
 `/api/analysis/smart-wallets` stay aggregates over every stored token, and every internal process
 (reputation, snapshots, analysis) keeps using all the data; nothing is deleted.
@@ -179,14 +199,20 @@ results in public tokens, although the record rates all of them. `/api/stats` an
 up to 25 tokens whose window ended 30 seconds ago, then refreshes the records of the affected
 wallets (and, when idle, of records older than an hour, so results leaving the 7 days count). On
 startup the same loop backfills every stored token in bounded batches, logging its progress; it is
-idempotent and resumes after a restart. It only writes its own tables.
+idempotent and resumes after a restart. It only writes its own tables. Each close records a
+version: tokens closed by an older version (before hold times and styles) are closed again, oldest
+first, which backfills `first_sell_at`, styles at entry, conviction counts and conviction outcomes
+from the stored trades. Until a token is closed again it has no conviction wallets, so it stays
+hidden; live buys are rated once the backfill has caught up.
 
 **Analysis.** For each closed token, the job also stores what copying its smart wallets would have
 returned: entry at the price right after the k-th smart wallet's first buy (k = number of smart
 wallets, capped at 5; with none, the last price at the first safety check), exit at 2× or at the
 last price 10 minutes later, minus a 3% round-trip cost. `GET /api/analysis/smart-wallets` groups
 those outcomes in buckets `0` … `5+` (statistics are `null` for an empty bucket; `reached2xPct` is
-within the 10 minutes, `medianPeakX` over the rest of the live window).
+within the 10 minutes, `medianPeakX` over the rest of the live window). With `by=conviction` the
+same statistics are grouped by conviction wallets, entered after the k-th conviction wallet's first
+buy.
 
 ## History
 
@@ -207,10 +233,15 @@ live streams.
 | `token_closures` | Tokens whose wallet results are closed |
 | `wallet_token_results` | Result of every wallet in every closed token |
 | `wallet_reputation` | Latest record of every wallet with results |
-| `token_smart_wallets`, `smart_wallet_tokens` | Smart wallets of each token (tier at entry) and their counts |
+| `token_smart_wallets`, `smart_wallet_tokens` | Smart wallets of each token (tier and style at entry) and their counts (`conviction` included) |
 | `smart_wallet_outcomes` | Outcome of each closed token for the smart-wallet analysis |
+| `conviction_outcomes` | The same outcome counting conviction wallets only (`by=conviction`) |
 
 The smart-wallet tables are created on startup in older databases too, and filled by the backfill.
+Columns added later (`token_closures.version`, `wallet_token_results.first_sell_at`,
+`token_smart_wallets.style_at_entry`, `smart_wallet_tokens.conviction`, `wallet_reputation.style`,
+`flip_rate`, `median_hold_seconds`) are added on startup to these derived tables only; raw tables
+are never altered.
 `token_state` and `token_snapshots` are created on startup in older databases too; the state
 of tokens stored before them is rebuilt from their screenings, momentum and trades.
 
@@ -233,12 +264,12 @@ While running, the screener exposes a read-only JSON + Server-Sent Events API on
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/health` | Status and data source health |
-| `GET /api/movers` | Latest momentum ranking (`minSmartWallets` filter) |
-| `GET /api/screenings` | Recent safety check results (`minSmartWallets` filter) |
-| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score, text and `minSmartWallets` filters, `sort=smartWallets:desc` |
+| `GET /api/movers` | Latest momentum ranking (`minConvictionWallets`, `minSmartWallets` filters) |
+| `GET /api/screenings` | Recent safety check results (`minConvictionWallets`, `minSmartWallets` filters) |
+| `GET /api/tokens` | Every token ever detected, paginated, with date, status, lifecycle, score, text, `minConvictionWallets` and `minSmartWallets` filters, `sort=convictionWallets:desc` or `sort=smartWallets:desc` |
 | `GET /api/tokens/:mint/smart-wallets` | Smart wallets of a token, with the record that makes each one good |
 | `GET /api/wallets/:address` | A wallet's current record and its results of the last 7 days |
-| `GET /api/analysis/smart-wallets` | Success of tokens by number of smart wallets (`from`, `to`) |
+| `GET /api/analysis/smart-wallets` | Success of tokens by number of smart wallets (`from`, `to`, `by=conviction`) |
 | `GET /api/tokens/:mint` | Full history of one token (public tokens only, like every token endpoint) |
 | `GET /api/tokens/:mint/snapshots` | Snapshots of one token, oldest first |
 | `GET /api/tokens/:mint/candles` | OHLCV candles (`interval=1s\|1m\|5m`, `limit`), dev trades and SOL/USD price |

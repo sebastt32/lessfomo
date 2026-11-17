@@ -10,7 +10,7 @@ export const LIVE_FEED = Symbol("LIVE_FEED");
     {
       provide: LIVE_FEED,
       inject: [APP_CONFIG],
-      useFactory: (config: AppConfig) => new LiveFeed(config.api.publicMinSmartWallets),
+      useFactory: (config: AppConfig) => new LiveFeed(config.api.publicMinConvictionWallets),
     },
   ],
   exports: [LIVE_FEED],

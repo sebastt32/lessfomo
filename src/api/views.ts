@@ -41,6 +41,7 @@ export const smartWalletsView = (summary: SmartWalletsSummary) => ({
   count: summary.count,
   elite: summary.elite,
   holding: summary.holding,
+  conviction: summary.conviction,
 });
 
 export const storedScreeningView = (screening: StoredScreening) => ({
@@ -213,6 +214,9 @@ export const walletRecordView = (record: WalletRecord) => ({
   netPnlSol: record.netPnlSol,
   avgPnlSol: record.avgPnlSol,
   medianEntrySeconds: record.medianEntrySeconds,
+  style: record.style,
+  flipRate: record.flipRate,
+  medianHoldSeconds: record.medianHoldSeconds,
   lastActiveAt: record.lastActiveAt?.toISOString() ?? null,
   updatedAt: record.updatedAt.toISOString(),
 });
@@ -220,6 +224,7 @@ export const walletRecordView = (record: WalletRecord) => ({
 export const smartWalletInTokenView = (wallet: SmartWalletInToken) => ({
   address: wallet.wallet,
   tierAtEntry: wallet.tierAtEntry,
+  styleAtEntry: wallet.styleAtEntry,
   record: walletRecordView(wallet.record),
   firstBuyAt: wallet.firstBuyAt.toISOString(),
   entrySeconds: wallet.entrySeconds,
@@ -245,9 +250,9 @@ export const walletDetailView = (detail: WalletDetail) => ({
   results: detail.results.map(walletTokenResultView),
 });
 
-export const smartWalletAnalysisView = (analysis: SmartWalletAnalysis) => ({
-  from: analysis.from.toISOString(),
-  to: analysis.to.toISOString(),
-  costRoundTrip: analysis.costRoundTrip,
-  buckets: analysis.buckets.map((bucket) => ({ ...bucket })),
-});
+/** Every response echoes `by`; `by=conviction` labels its buckets `convictionWallets` instead of `smartWallets`. */
+export const smartWalletAnalysisView = (analysis: SmartWalletAnalysis) => {
+  const base = { from: analysis.from.toISOString(), to: analysis.to.toISOString(), by: analysis.by, costRoundTrip: analysis.costRoundTrip };
+  if (analysis.by !== "conviction") return { ...base, buckets: analysis.buckets.map((bucket) => ({ ...bucket })) };
+  return { ...base, buckets: analysis.buckets.map(({ smartWallets, ...rest }) => ({ convictionWallets: smartWallets, ...rest })) };
+};

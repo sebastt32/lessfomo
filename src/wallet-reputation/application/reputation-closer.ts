@@ -1,5 +1,5 @@
-import type { ClosedResult } from "../domain/closed-result.js";
-import { tierOf, walletRecord, type ReputationRules, type WalletRecord } from "../domain/reputation-rules.js";
+import { NO_STATS, type ClosedResult } from "../domain/closed-result.js";
+import { DEFAULT_STYLE_RULES, styleOf, tierOf, walletRecord, type ReputationRules, type WalletRecord } from "../domain/reputation-rules.js";
 import { DEFAULT_OUTCOME_RULES, tokenOutcome, type OutcomeRules } from "../domain/smart-wallet-outcome.js";
 import { closeTokenResults, isHolding, tradesBefore } from "../domain/wallet-positions.js";
 import type { ClosableToken, SmartWalletEntry, WalletReputationStore } from "../domain/wallet-reputation-store.js";
@@ -52,7 +52,9 @@ const PROGRESS_LOG_MS = 10_000;
  * smart wallets with exact point-in-time tiers, and its outcome for the analysis; then refreshes
  * the affected wallets' current records. Tokens close oldest first, so the results that rate a buy
  * are always stored before it. On startup the same loop backfills every stored token, a bounded
- * batch per tick; closing is idempotent and resumes after a restart.
+ * batch per tick; closing is idempotent and resumes after a restart. Tokens closed by an older
+ * version are closed again the same way (oldest first), which backfills hold times and styles
+ * (decision D7) without touching the trades they come from.
  */
 export class ReputationCloser {
   private readonly clock: () => Date;
@@ -141,18 +143,24 @@ export class ReputationCloser {
             results.map(({ wallet, firstBuyAt }) => ({ wallet, at: firstBuyAt })),
             rules.lookbackMs,
             token.mint,
+            (rules.style ?? DEFAULT_STYLE_RULES).flipWindowMs,
           );
 
     const smartWallets: SmartWalletEntry[] = [];
     const smartFirstBuys: number[] = [];
+    const convictionFirstBuys: number[] = [];
     for (const result of results) {
       const position = positions.get(result.wallet)!;
-      const tier = tierOf(stats.get(result.wallet) ?? { tokens: 0, wins: 0, netPnlSol: 0 }, rules);
+      const walletStats = stats.get(result.wallet) ?? NO_STATS;
+      const tier = tierOf(walletStats, rules);
       if (tier === "none") continue;
+      const style = styleOf(walletStats, rules);
       smartFirstBuys.push(position.firstBuyIndex);
+      if (style === "conviction") convictionFirstBuys.push(position.firstBuyIndex);
       smartWallets.push({
         wallet: result.wallet,
         tierAtEntry: tier,
+        styleAtEntry: style,
         firstBuyAt: result.firstBuyAt,
         entrySeconds: result.entrySeconds,
         boughtSol: result.boughtSol,
@@ -160,10 +168,20 @@ export class ReputationCloser {
         stillHolding: isHolding(position),
       });
     }
-    const screenedAt = smartWallets.length === 0 ? await store.firstScreeningAt(token.mint) : null;
-    const outcome = tokenOutcome(trades, smartFirstBuys, screenedAt, this.options.outcomeRules ?? DEFAULT_OUTCOME_RULES);
+    const screenedAt = convictionFirstBuys.length === 0 ? await store.firstScreeningAt(token.mint) : null;
+    const outcomeRules = this.options.outcomeRules ?? DEFAULT_OUTCOME_RULES;
+    const outcome = tokenOutcome(trades, smartFirstBuys, screenedAt, outcomeRules);
+    const convictionOutcome = tokenOutcome(trades, convictionFirstBuys, screenedAt, outcomeRules);
 
-    await store.saveTokenClose({ mint: token.mint, detectedAt: token.detectedAt, closedAt, results, smartWallets, outcome });
+    await store.saveTokenClose({
+      mint: token.mint,
+      detectedAt: token.detectedAt,
+      closedAt,
+      results,
+      smartWallets,
+      outcome,
+      convictionOutcome,
+    });
     for (const { wallet } of results) this.dirty.add(wallet);
   }
 

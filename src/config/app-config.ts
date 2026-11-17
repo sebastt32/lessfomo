@@ -10,8 +10,8 @@ export interface AppConfig {
     readonly corsOrigins: readonly string[];
     /** Interval between `: ping` comments on open SSE streams. */
     readonly heartbeatMs: number;
-    /** Good-or-elite wallets a token needs to be public (docs/API.md "Public visibility rule"). */
-    readonly publicMinSmartWallets: number;
+    /** Conviction wallets at entry a token needs to be public (docs/API.md "Public visibility rule", decision D7). */
+    readonly publicMinConvictionWallets: number;
   };
   readonly history: {
     /** PostgreSQL when set, otherwise SQLite at `sqlitePath`. */
@@ -41,7 +41,7 @@ export interface AppConfig {
     readonly holderMinIntervalMs: number;
   };
   readonly walletReputation: {
-    /** Tier thresholds, lookback and bot flag (decision D1). */
+    /** Tier thresholds, lookback, bot flag (decision D1) and trading-style thresholds (decision D7). */
     readonly rules: ReputationRules;
     /** Wait after a token's live window before closing its results, so its last trades are stored. */
     readonly closeGraceMs: number;
@@ -80,7 +80,7 @@ export const loadAppConfig = (env: Environment, startedAt: Date): AppConfig => (
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0),
     heartbeatMs: 15_000,
-    publicMinSmartWallets: readPositiveInteger(env, "PUBLIC_MIN_SMART_WALLETS", 5),
+    publicMinConvictionWallets: readPositiveInteger(env, "PUBLIC_MIN_CONVICTION_WALLETS", 3),
   },
   history: {
     databaseUrl: env["DATABASE_URL"] || undefined,

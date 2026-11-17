@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { TokenVisibility } from "../../api/token-visibility.js";
 import { loadAppConfig } from "../../config/app-config.js";
 import { SqliteHistoryRecorder } from "../../history/infrastructure/sqlite/sqlite-history-recorder.js";
 import { LiveFeed } from "../../live-feed/application/live-feed.js";
 import type { Trade } from "../../momentum/domain/trade.js";
 import type { NewToken } from "../../token-discovery/domain/new-token.js";
-import { DEFAULT_REPUTATION_RULES, statsAt, tierOf, type ReputationRules, type WalletTier } from "../domain/reputation-rules.js";
+import { DEFAULT_REPUTATION_RULES, statsAt, styleOf, tierOf, type ReputationRules, type WalletStyle, type WalletTier } from "../domain/reputation-rules.js";
 import { ReputationCloser } from "./reputation-closer.js";
 import { SmartWalletTracker } from "./smart-wallet-tracker.js";
 
@@ -129,15 +129,15 @@ describe("closed results use only trades before the close (no look-ahead)", () =
 /** The production wiring of the tracker and the closer, on one store. */
 const wire = (store: SqliteHistoryRecorder, rules: ReputationRules, window: number, clock: () => Date, closeGraceMs = 30_000) => {
   const feed = new LiveFeed(1);
-  const live = new Map<string, Map<string, WalletTier>>();
+  const live = new Map<string, Map<string, string>>();
   const tracker = new SmartWalletTracker({
     trackingWindowMs: window,
     rules,
-    statsAtBuys: (buys, excludedMint) => store.statsAtBuys(buys, rules.lookbackMs, excludedMint),
+    statsAtBuys: (buys, excludedMint) => store.statsAtBuys(buys, rules.lookbackMs, excludedMint, rules.style.flipWindowMs),
     onChange: (change) => feed.smartWalletChanged(change),
     persist: (mint, entry) => {
-      const tiers = live.get(mint) ?? new Map<string, WalletTier>();
-      tiers.set(entry.wallet, entry.tierAtEntry);
+      const tiers = live.get(mint) ?? new Map<string, string>();
+      tiers.set(entry.wallet, `${entry.tierAtEntry}/${entry.styleAtEntry}`);
       live.set(mint, tiers);
       void store.saveSmartWallet(mint, entry);
     },
@@ -191,7 +191,8 @@ describe("live smart wallets use point-in-time tiers only", () => {
     const buy = tr("A", "W", "buy", clock + MIN, 1, 1000);
     await store.recordTrade(buy);
     tracker.tradeRecorded(buy);
-    const visibility = new TokenVisibility(feed, store, loadAppConfig({ PUBLIC_MIN_SMART_WALLETS: "1" }, new Date()));
+    // The old "1 good wallet" rule is now 1 conviction wallet: W never flipped, so it would count if it were good.
+    const visibility = new TokenVisibility(feed, store, loadAppConfig({ PUBLIC_MIN_CONVICTION_WALLETS: "1" }, new Date()));
     expect(await visibility.isPublic("A")).toBe(false);
 
     // Once every result closed before the buy is stored, the buy is rated: none at that moment.
@@ -203,7 +204,7 @@ describe("live smart wallets use point-in-time tiers only", () => {
 
     clock += 2 * HOUR;
     await closer.tick();
-    expect(await store.tokenSmartSummary("A")).toEqual({ count: 0, elite: 0, holding: 0 });
+    expect(await store.tokenSmartSummary("A")).toEqual({ count: 0, elite: 0, holding: 0, conviction: 0 });
   });
 });
 
@@ -219,7 +220,7 @@ const prng = (seed: number) => {
   };
 };
 
-describe("property: the live tier of a buy always equals the canonical point-in-time recompute", () => {
+describe("property: the live tier and style of a buy always equal the canonical point-in-time recompute", () => {
   const WINDOW = 10 * MIN;
   const STEP = 10_000;
   const RULES: ReputationRules = {
@@ -227,9 +228,17 @@ describe("property: the live tier of a buy always equals the canonical point-in-
     good: { minTokens: 2, minWinRatePct: 50, minNetPnlSol: 0 },
     elite: { minTokens: 4, minWinRatePct: 60, minNetPnlSol: 1 },
     botTokensPerHour: 1_000,
+    // Lower style thresholds so the random trades produce every style (D7).
+    style: { flipWindowMs: 120_000, convictionMaxFlipRatePct: 10, flipperMinFlipRatePct: 30 },
   };
   const WALLETS = ["w0", "w1", "w2", "w3", "w4", "w5"];
   const OTHERS = Array.from({ length: 50 }, (_, i) => `x${i}`);
+
+  const allStyles: WalletStyle[] = [];
+  afterAll(() => {
+    // The seeds together exercise every style of a good-or-elite wallet.
+    expect(new Set(allStyles)).toEqual(new Set(["conviction", "mixed", "flipper"]));
+  });
 
   it.each([1, 2, 3, 4, 5, 6, 7, 8])("seed %i", async (seed) => {
     const random = prng(seed);
@@ -274,20 +283,30 @@ describe("property: the live tier of a buy always equals the canonical point-in-
     const results = await store.walletResults([...WALLETS, ...OTHERS], new Date(0));
     let checked = 0;
     let smart = 0;
+    const styles = new Set<WalletStyle>();
     for (const [mint, buys] of firstBuys) {
-      const canonical = new Map<string, WalletTier>();
+      const canonical = new Map<string, string>();
       for (const [wallet, at] of buys) {
         const own = results.filter((result) => result.wallet === wallet && result.mint !== mint);
-        const tier = tierOf(statsAt(own, at, RULES.lookbackMs), RULES);
-        if (tier !== "none") canonical.set(wallet, tier);
+        const stats = statsAt(own, at, RULES.lookbackMs, RULES.style.flipWindowMs);
+        const tier: WalletTier = tierOf(stats, RULES);
+        const style: WalletStyle = styleOf(stats, RULES);
+        if (tier !== "none") canonical.set(wallet, `${tier}/${style}`);
+        if (tier !== "none") styles.add(style);
         checked += 1;
       }
       smart += canonical.size;
       expect([...(live.get(mint) ?? new Map())].sort(), `live ${mint}`).toEqual([...canonical].sort());
       const stored = await store.tokenSmartWallets(mint);
-      expect(stored.map(({ wallet, tierAtEntry }) => [wallet, tierAtEntry]).sort(), `stored ${mint}`).toEqual([...canonical].sort());
+      expect(
+        stored.map(({ wallet, tierAtEntry, styleAtEntry }) => [wallet, `${tierAtEntry}/${styleAtEntry}`]).sort(),
+        `stored ${mint}`,
+      ).toEqual([...canonical].sort());
+      const conviction = [...canonical.values()].filter((value) => value.endsWith("/conviction")).length;
+      expect((await store.tokenSmartSummary(mint)).conviction, `conviction ${mint}`).toBe(conviction);
     }
     expect(checked).toBeGreaterThan(50);
     expect(smart).toBeGreaterThan(0);
+    allStyles.push(...styles);
   });
 });

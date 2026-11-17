@@ -253,7 +253,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         totalHolders: null,
         evaluatedAt: new Date("2026-11-13T20:02:00.000Z"),
         detectedAt: new Date("2026-11-13T20:00:00.000Z"),
-        smartWallets: { count: 0, elite: 0, holding: 0 },
+        smartWallets: { count: 0, elite: 0, holding: 0, conviction: 0 },
       },
       {
         mint: "a",
@@ -267,7 +267,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         totalHolders: 3,
         evaluatedAt: new Date("2026-11-13T20:01:00.000Z"),
         detectedAt: new Date("2026-11-13T20:00:00.000Z"),
-        smartWallets: { count: 0, elite: 0, holding: 0 },
+        smartWallets: { count: 0, elite: 0, holding: 0, conviction: 0 },
       },
     ]);
   });
@@ -617,7 +617,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
           holders: 61,
           lastTradeAt: ago(10 * 60_000),
           snapshotCount: 1,
-          smartWallets: { count: 0, elite: 0, holding: 0 },
+          smartWallets: { count: 0, elite: 0, holding: 0, conviction: 0 },
         },
         expect.objectContaining({
           token: expect.objectContaining({ mint: "old" }),
@@ -979,6 +979,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
     const result = (wallet: string, pnlSol: number, closedAt: Date) => ({
       wallet,
       firstBuyAt: new Date(closedAt.getTime() - 50 * 60_000),
+      firstSellAt: null as Date | null,
       entrySeconds: 600,
       boughtSol: 1,
       soldSol: 1 + pnlSol,
@@ -988,6 +989,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
     const entry = (wallet: string, overrides: Partial<SmartWalletEntry> = {}): SmartWalletEntry => ({
       wallet,
       tierAtEntry: "good",
+      styleAtEntry: "conviction",
       firstBuyAt: ago(30 * 60_000),
       entrySeconds: 12.5,
       boughtSol: 1.25,
@@ -1014,6 +1016,9 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
       netPnlSol: 5.5,
       avgPnlSol: 0.916666667,
       medianEntrySeconds: 10,
+      style: "conviction",
+      flipRate: 0,
+      medianHoldSeconds: 120,
       lastActiveAt: ago(HOUR),
       updatedAt: ago(10 * 60_000),
       ...overrides,
@@ -1046,9 +1051,9 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         "self",
       );
 
-      expect([...stats.entries()]).toEqual([["w1", { tokens: 2, wins: 1, netPnlSol: 1.5 }]]);
+      expect([...stats.entries()]).toEqual([["w1", { tokens: 2, wins: 1, netPnlSol: 1.5, flips: 0 }]]);
       expect([...(await history.statsAtBuys([{ wallet: "w2", at: NOW }], LOOKBACK, "x")).entries()]).toEqual([
-        ["w2", { tokens: 1, wins: 1, netPnlSol: 100 }],
+        ["w2", { tokens: 1, wins: 1, netPnlSol: 100, flips: 0 }],
       ]);
     });
 
@@ -1078,6 +1083,7 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         count: 1,
         elite: 1,
         holding: 0,
+        conviction: 1,
       });
       expect(await history.closableTokens(null, ago(HOUR), 10)).toEqual([{ mint: "b", creator: "dev", detectedAt: ago(2 * HOUR) }]);
       expect(await history.closableTokens(ago(HOUR), NOW, 10)).toEqual([{ mint: "c", creator: "dev", detectedAt: ago(10 * 60_000) }]);
@@ -1147,9 +1153,9 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
       const sorted = await history.listTokens(listQuery({ sort: { field: "smartWallets", direction: "desc" } }));
 
       expect(all.tokens.map((t) => [t.token.mint, t.smartWallets])).toEqual([
-        ["c", { count: 0, elite: 0, holding: 0 }],
-        ["b", { count: 1, elite: 0, holding: 0 }],
-        ["a", { count: 2, elite: 1, holding: 2 }],
+        ["c", { count: 0, elite: 0, holding: 0, conviction: 0 }],
+        ["b", { count: 1, elite: 0, holding: 0, conviction: 1 }],
+        ["a", { count: 2, elite: 1, holding: 2, conviction: 2 }],
       ]);
       expect([atLeastOne.tokens.map((t) => t.token.mint), atLeastOne.total]).toEqual([["b", "a"], 2]);
       expect([atLeastTwo.tokens.map((t) => t.token.mint), atLeastTwo.total]).toEqual([["a"], 1]);
@@ -1158,13 +1164,13 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
       expect((await history.recentScreenings(10, 1)).map((s) => s.mint)).toEqual(["b", "a"]);
       expect((await history.recentScreenings(1, 2)).map((s) => s.mint)).toEqual(["a"]);
       expect((await history.recentScreenings(10)).map((s) => [s.mint, s.smartWallets])).toEqual([
-        ["c", { count: 0, elite: 0, holding: 0 }],
-        ["b", { count: 1, elite: 0, holding: 0 }],
-        ["a", { count: 2, elite: 1, holding: 2 }],
+        ["c", { count: 0, elite: 0, holding: 0, conviction: 0 }],
+        ["b", { count: 1, elite: 0, holding: 0, conviction: 1 }],
+        ["a", { count: 2, elite: 1, holding: 2, conviction: 2 }],
       ]);
-      expect((await history.tokenHistory("a"))?.screenings[0]?.smartWallets).toEqual({ count: 2, elite: 1, holding: 2 });
-      expect(await history.tokenSmartSummary("a")).toEqual({ count: 2, elite: 1, holding: 2 });
-      expect(await history.tokenSmartSummary("c")).toEqual({ count: 0, elite: 0, holding: 0 });
+      expect((await history.tokenHistory("a"))?.screenings[0]?.smartWallets).toEqual({ count: 2, elite: 1, holding: 2, conviction: 2 });
+      expect(await history.tokenSmartSummary("a")).toEqual({ count: 2, elite: 1, holding: 2, conviction: 2 });
+      expect(await history.tokenSmartSummary("c")).toEqual({ count: 0, elite: 0, holding: 0, conviction: 0 });
       expect([...(await history.mintsWithSmartWallets(["a", "b", "c", "zz"], 1))].sort()).toEqual(["a", "b"]);
       expect([...(await history.mintsWithSmartWallets(["a", "b"], 2))]).toEqual(["a"]);
     });
@@ -1199,6 +1205,115 @@ describe.each([sqliteAdapter, postgresAdapter])("$name history", (adapter) => {
         { smartWallets: 2, returnPct: 97, reached2x: true, peakX: 1.5, migrated: true },
         { smartWallets: 0, returnPct: -3, reached2x: false, peakX: 1.5, migrated: false },
       ]);
+    });
+
+    it("counts flips at each buy: first sell at most the flip window after the first buy, never sold = no flip (D7)", async () => {
+      const history = await open();
+      const buyAt = ago(DAY);
+      const before = (mint: string, holdMs: number | null, hoursBefore: number) => {
+        const closedAt = new Date(buyAt.getTime() - hoursBefore * HOUR);
+        const own = result("w1", 1, closedAt);
+        return close(mint, {
+          closedAt,
+          results: [{ ...own, firstSellAt: holdMs === null ? null : new Date(own.firstBuyAt.getTime() + holdMs) }],
+        });
+      };
+      await history.saveTokenClose(before("m1", 120_000, 1)); // flip (boundary)
+      await history.saveTokenClose(before("m2", 120_001, 2)); // held
+      await history.saveTokenClose(before("m3", null, 3)); // never sold
+      // A flip closed after the buy never counts (look-ahead).
+      const after = result("w1", 1, ago(HOUR));
+      await history.saveTokenClose(close("m4", { closedAt: ago(HOUR), results: [{ ...after, firstSellAt: after.firstBuyAt }] }));
+
+      const stats = await history.statsAtBuys([{ wallet: "w1", at: buyAt }], LOOKBACK, "x", 120_000);
+
+      expect([...stats.entries()]).toEqual([["w1", { tokens: 3, wins: 3, netPnlSol: 3, flips: 1 }]]);
+      expect((await history.statsAtBuys([{ wallet: "w1", at: buyAt }], LOOKBACK, "x", 200_000)).get("w1")?.flips).toBe(2);
+      expect((await history.walletResults(["w1"], ago(2 * DAY))).map((r) => r.firstSellAt?.getTime() ?? null)).toEqual([
+        after.firstBuyAt.getTime(),
+        new Date(buyAt.getTime() - HOUR - 50 * 60_000 + 120_000).getTime(),
+        new Date(buyAt.getTime() - 2 * HOUR - 50 * 60_000 + 120_001).getTime(),
+        null,
+      ]);
+    });
+
+    it("filters, sorts and checks visibility by conviction wallets, and keeps conviction outcomes", async () => {
+      const history = await open();
+      for (const [mint, minutes] of [
+        ["a", 30],
+        ["b", 20],
+        ["c", 10],
+      ] as const) {
+        await history.recordToken(token(mint, { detectedAt: ago(minutes * 60_000) }));
+        await history.recordScreening(failed(mint), ago(minutes * 60_000 - 1000));
+      }
+      // a: 3 smart wallets, 1 conviction; b: 2 smart wallets, 2 conviction; c: none.
+      await history.saveSmartWallet("a", entry("w1"));
+      await history.saveSmartWallet("a", entry("w2", { styleAtEntry: "flipper" }));
+      await history.saveSmartWallet("a", entry("w3", { styleAtEntry: "mixed" }));
+      await history.saveSmartWallet("b", entry("w1"));
+      await history.saveSmartWallet("b", entry("w4", { tierAtEntry: "elite" }));
+
+      const two = await history.listTokens(listQuery({ minConvictionWallets: 2 }));
+      const both = await history.listTokens(listQuery({ minConvictionWallets: 1, minSmartWallets: 3 }));
+      const sorted = await history.listTokens(listQuery({ sort: { field: "convictionWallets", direction: "desc" } }));
+
+      expect([two.tokens.map((t) => t.token.mint), two.total]).toEqual([["b"], 1]);
+      expect([both.tokens.map((t) => t.token.mint), both.total]).toEqual([["a"], 1]);
+      expect(sorted.tokens.map((t) => [t.token.mint, t.smartWallets])).toEqual([
+        ["b", { count: 2, elite: 1, holding: 2, conviction: 2 }],
+        ["a", { count: 3, elite: 0, holding: 3, conviction: 1 }],
+        ["c", { count: 0, elite: 0, holding: 0, conviction: 0 }],
+      ]);
+      expect((await history.recentScreenings(10, 0, 1)).map((s) => s.mint)).toEqual(["b", "a"]);
+      expect((await history.recentScreenings(10, 0, 2)).map((s) => s.mint)).toEqual(["b"]);
+      expect((await history.recentScreenings(10, 3, 1)).map((s) => s.mint)).toEqual(["a"]);
+      expect([...(await history.mintsWithConvictionWallets(["a", "b", "c"], 2))]).toEqual(["b"]);
+      expect((await history.tokenSmartWallets("a")).map((e) => [e.wallet, e.styleAtEntry])).toEqual([
+        ["w1", "conviction"],
+        ["w2", "flipper"],
+        ["w3", "mixed"],
+      ]);
+
+      const outcome = { smartWallets: 1, entryAt: ago(3 * HOUR), entryPriceSol: 0.00000003, returnPct: 97, reached2x: true, peakX: 2 };
+      await history.saveTokenClose(close("a", { detectedAt: ago(3 * HOUR), outcome: { ...outcome, smartWallets: 3 }, convictionOutcome: outcome }));
+      await history.saveTokenClose(close("a", { detectedAt: ago(3 * HOUR), outcome: { ...outcome, smartWallets: 3 }, convictionOutcome: outcome }));
+      expect(await history.convictionOutcomes(ago(5 * HOUR), NOW)).toEqual([
+        { smartWallets: 1, returnPct: 97, reached2x: true, peakX: 2, migrated: false },
+      ]);
+      expect((await history.smartWalletOutcomes(ago(5 * HOUR), NOW)).map((o) => o.smartWallets)).toEqual([3]);
+    });
+
+    it("adds the D7 columns to a database closed before them and offers its closed tokens again", async () => {
+      const history = await open();
+      await history.recordToken(token("a", { detectedAt: ago(3 * HOUR) }));
+      await history.recordTrade(trade);
+      await history.saveTokenClose(close("a", { detectedAt: ago(3 * HOUR), results: [result("w1", 1, ago(2 * HOUR))] }));
+      expect(await history.closableTokens(null, NOW, 10)).toEqual([]);
+      await execOnLast(
+        [
+          "ALTER TABLE token_closures DROP COLUMN version",
+          "ALTER TABLE wallet_token_results DROP COLUMN first_sell_at",
+          "ALTER TABLE token_smart_wallets DROP COLUMN style_at_entry",
+          "DROP INDEX smart_wallet_tokens_conviction",
+          "ALTER TABLE smart_wallet_tokens DROP COLUMN conviction",
+          "ALTER TABLE wallet_reputation DROP COLUMN style",
+          "ALTER TABLE wallet_reputation DROP COLUMN flip_rate",
+          "ALTER TABLE wallet_reputation DROP COLUMN median_hold_seconds",
+          "DROP TABLE conviction_outcomes",
+        ].join("; "),
+      );
+
+      const migrated = await reopenLast();
+      await reopenLast();
+      const again = await reopenLast();
+
+      expect((await again.closableTokens(null, NOW, 10)).map((t) => t.mint)).toEqual(["a"]);
+      expect((await again.walletResults(["w1"], ago(DAY))).map((r) => r.firstSellAt)).toEqual([null]);
+      expect(await countOf("tokens")).toBe(1);
+      expect(await countOf("trades")).toBe(1);
+      expect(await countOf("wallet_token_results")).toBe(1);
+      expect(migrated).toBeDefined();
     });
 
     it("creates the new tables on an existing database without touching its data", async () => {

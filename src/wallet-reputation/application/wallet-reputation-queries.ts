@@ -12,7 +12,11 @@ export interface WalletDetail {
   readonly results: readonly StoredWalletResult[];
 }
 
+/** What the analysis buckets tokens by: every good-or-elite wallet, or only conviction ones (decision D7). */
+export type AnalysisBy = "smartWallets" | "conviction";
+
 export interface SmartWalletAnalysis {
+  readonly by: AnalysisBy;
   readonly from: Date;
   readonly to: Date;
   readonly costRoundTrip: number;
@@ -54,10 +58,14 @@ export class WalletReputationQueries {
       );
   }
 
-  /** Success per number of smart wallets, over closed tokens detected in [from, to). */
-  async analysis(from: Date, to: Date): Promise<SmartWalletAnalysis> {
-    const samples = await this.store.smartWalletOutcomes(from, to);
+  /**
+   * Success per number of smart wallets (or conviction wallets, entered after the k-th conviction
+   * wallet's first buy), over closed tokens detected in [from, to).
+   */
+  async analysis(from: Date, to: Date, by: AnalysisBy = "smartWallets"): Promise<SmartWalletAnalysis> {
+    const samples = by === "conviction" ? await this.store.convictionOutcomes(from, to) : await this.store.smartWalletOutcomes(from, to);
     return {
+      by,
       from,
       to,
       costRoundTrip: DEFAULT_OUTCOME_RULES.costRoundTrip,

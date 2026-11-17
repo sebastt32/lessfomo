@@ -84,6 +84,10 @@ import {
   tokenSmartSummarySql,
   tokenSmartWalletsSql,
   mintsWithSmartWalletsStatement,
+  mintsWithConvictionWalletsStatement,
+  convictionOutcomesStatement,
+  walletReputationAddedColumns,
+  WALLET_REPUTATION_ADDED_INDEXES,
   tokenTradesSql,
   toObservedTrade,
   toSmartWalletEntry,
@@ -95,10 +99,12 @@ import {
   walletResultsStatement,
   WALLETS_PER_QUERY,
 } from "../wallet-reputation-sql.js";
+import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
 import {
   candlesSql,
   devTradesSql,
   momentumValues,
+  recentScreeningsParams,
   recentScreeningsSql,
   SCREENING_COLUMNS,
   SCREENINGS_WITH_TOKEN,
@@ -255,6 +261,10 @@ export class PostgresHistory
         await client.query("BEGIN");
         await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_ID]);
         await client.query(SCHEMA);
+        for (const { table, column, definition } of walletReputationAddedColumns({ real: "DOUBLE PRECISION", time: "BIGINT" })) {
+          await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
+        }
+        await client.query(WALLET_REPUTATION_ADDED_INDEXES);
         await client.query(backfillTokenStateSql(CHART_DIALECT));
         await client.query("COMMIT");
       } catch (error) {
@@ -296,9 +306,9 @@ export class PostgresHistory
     ]);
   }
 
-  async recentScreenings(limit: number, minSmartWallets = 0): Promise<StoredScreening[]> {
-    const params = minSmartWallets > 0 ? [limit, minSmartWallets] : [limit];
-    const rows = await this.query(recentScreeningsSql(CHART_DIALECT, minSmartWallets), ...params);
+  async recentScreenings(limit: number, minSmartWallets = 0, minConvictionWallets = 0): Promise<StoredScreening[]> {
+    const params = recentScreeningsParams(limit, minSmartWallets, minConvictionWallets);
+    const rows = await this.query(recentScreeningsSql(CHART_DIALECT, minSmartWallets, minConvictionWallets), ...params);
     return rows.map(toScreening);
   }
 
@@ -391,10 +401,15 @@ export class PostgresHistory
     return toFirstScreeningAt((await this.query(firstScreeningSql(CHART_DIALECT), mint))[0]);
   }
 
-  async statsAtBuys(buys: readonly WalletBuy[], lookbackMs: number, excludedMint: string): Promise<Map<string, ReputationStats>> {
+  async statsAtBuys(
+    buys: readonly WalletBuy[],
+    lookbackMs: number,
+    excludedMint: string,
+    flipWindowMs = DEFAULT_STYLE_RULES.flipWindowMs,
+  ): Promise<Map<string, ReputationStats>> {
     const stats = new Map<string, ReputationStats>();
     for (const chunk of chunked(buys, WALLETS_PER_QUERY)) {
-      for (const row of await this.rows(statsAtBuysStatement(CATALOG_DIALECT, chunk, lookbackMs, excludedMint))) {
+      for (const row of await this.rows(statsAtBuysStatement(CATALOG_DIALECT, chunk, lookbackMs, excludedMint, flipWindowMs))) {
         stats.set(...toStatsEntry(row));
       }
     }
@@ -451,8 +466,22 @@ export class PostgresHistory
     return found;
   }
 
+  async mintsWithConvictionWallets(mints: readonly string[], minConvictionWallets: number): Promise<Set<string>> {
+    const found = new Set<string>();
+    for (const chunk of chunked(mints, WALLETS_PER_QUERY)) {
+      for (const row of await this.rows(mintsWithConvictionWalletsStatement(CATALOG_DIALECT, chunk, minConvictionWallets))) {
+        found.add(String(row["mint"]));
+      }
+    }
+    return found;
+  }
+
   async smartWalletOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return (await this.rows(smartWalletOutcomesStatement(CATALOG_DIALECT, from, to))).map(toStoredOutcome);
+  }
+
+  async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
+    return (await this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to))).map(toStoredOutcome);
   }
 
   /**

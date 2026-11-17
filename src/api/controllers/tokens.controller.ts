@@ -42,7 +42,7 @@ export class TokensController {
 
   @Get("tokens")
   async list(@SearchParams() params: URLSearchParams) {
-    const query = parseTokenListQuery(params, new Date(), this.config.api.publicMinSmartWallets);
+    const query = parseTokenListQuery(params, new Date(), this.config.api.publicMinConvictionWallets);
     const { tokens, total } = await this.catalog.listTokens(query);
     return { tokens: tokens.map(tokenListItemView), page: query.page, pageSize: query.pageSize, total };
   }

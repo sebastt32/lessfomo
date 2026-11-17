@@ -85,6 +85,10 @@ import {
   tokenSmartSummarySql,
   tokenSmartWalletsSql,
   mintsWithSmartWalletsStatement,
+  mintsWithConvictionWalletsStatement,
+  convictionOutcomesStatement,
+  walletReputationAddedColumns,
+  WALLET_REPUTATION_ADDED_INDEXES,
   tokenTradesSql,
   toObservedTrade,
   toSmartWalletEntry,
@@ -96,10 +100,12 @@ import {
   walletResultsStatement,
   WALLETS_PER_QUERY,
 } from "../wallet-reputation-sql.js";
+import { DEFAULT_STYLE_RULES } from "../../../wallet-reputation/domain/reputation-rules.js";
 import {
   candlesSql,
   devTradesSql,
   momentumValues,
+  recentScreeningsParams,
   recentScreeningsSql,
   SCREENING_COLUMNS,
   SCREENINGS_WITH_TOKEN,
@@ -201,6 +207,7 @@ export class SqliteHistoryRecorder
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     this.db.exec(SCHEMA);
+    this.addColumns();
     this.db.exec(backfillTokenStateSql(CHART_DIALECT));
 
     this.insertToken = this.db.prepare(
@@ -241,9 +248,9 @@ export class SqliteHistoryRecorder
     });
   }
 
-  async recentScreenings(limit: number, minSmartWallets = 0): Promise<StoredScreening[]> {
-    const params = minSmartWallets > 0 ? [limit, minSmartWallets] : [limit];
-    return this.query(recentScreeningsSql(CHART_DIALECT, minSmartWallets), ...params).map(toScreening);
+  async recentScreenings(limit: number, minSmartWallets = 0, minConvictionWallets = 0): Promise<StoredScreening[]> {
+    const params = recentScreeningsParams(limit, minSmartWallets, minConvictionWallets);
+    return this.query(recentScreeningsSql(CHART_DIALECT, minSmartWallets, minConvictionWallets), ...params).map(toScreening);
   }
 
   async tokenHistory(mint: string): Promise<TokenHistory | null> {
@@ -331,10 +338,15 @@ export class SqliteHistoryRecorder
     return toFirstScreeningAt(this.query(firstScreeningSql(CHART_DIALECT), mint)[0]);
   }
 
-  async statsAtBuys(buys: readonly WalletBuy[], lookbackMs: number, excludedMint: string): Promise<Map<string, ReputationStats>> {
+  async statsAtBuys(
+    buys: readonly WalletBuy[],
+    lookbackMs: number,
+    excludedMint: string,
+    flipWindowMs = DEFAULT_STYLE_RULES.flipWindowMs,
+  ): Promise<Map<string, ReputationStats>> {
     const stats = new Map<string, ReputationStats>();
     for (const chunk of chunked(buys, WALLETS_PER_QUERY)) {
-      for (const row of this.rows(statsAtBuysStatement(CATALOG_DIALECT, chunk, lookbackMs, excludedMint))) {
+      for (const row of this.rows(statsAtBuysStatement(CATALOG_DIALECT, chunk, lookbackMs, excludedMint, flipWindowMs))) {
         stats.set(...toStatsEntry(row));
       }
     }
@@ -388,8 +400,31 @@ export class SqliteHistoryRecorder
     return found;
   }
 
+  async mintsWithConvictionWallets(mints: readonly string[], minConvictionWallets: number): Promise<Set<string>> {
+    const found = new Set<string>();
+    for (const chunk of chunked(mints, WALLETS_PER_QUERY)) {
+      for (const row of this.rows(mintsWithConvictionWalletsStatement(CATALOG_DIALECT, chunk, minConvictionWallets))) {
+        found.add(String(row["mint"]));
+      }
+    }
+    return found;
+  }
+
   async smartWalletOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
     return this.rows(smartWalletOutcomesStatement(CATALOG_DIALECT, from, to)).map(toStoredOutcome);
+  }
+
+  async convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]> {
+    return this.rows(convictionOutcomesStatement(CATALOG_DIALECT, from, to)).map(toStoredOutcome);
+  }
+
+  /** Adds the columns of later versions to existing derived tables, once (SQLite has no ADD COLUMN IF NOT EXISTS). */
+  private addColumns(): void {
+    for (const { table, column, definition } of walletReputationAddedColumns({ real: "REAL", time: "INTEGER" })) {
+      const exists = this.query(`SELECT 1 AS found FROM pragma_table_info(?) WHERE name = ?`, table, column).length > 0;
+      if (!exists) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+    this.db.exec(WALLET_REPUTATION_ADDED_INDEXES);
   }
 
   /** Runs a query and returns plain rows; intended for analysis scripts and tests. */

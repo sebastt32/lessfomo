@@ -131,6 +131,7 @@ describe("ReputationCloser", () => {
       {
         wallet: "w1",
         tierAtEntry: "good",
+        styleAtEntry: "flipper", // D7: every prior token was sold 1 minute after the buy
         firstBuyAt: new Date(T0 + 5 * HOUR + MINUTE),
         entrySeconds: 21 * 60,
         boughtSol: 1,
@@ -169,5 +170,107 @@ describe("ReputationCloser", () => {
     await closer.tick();
     expect(pushed.map((r) => [r.address, r.tier, r.tokens])).toEqual([["w1", "none", 0]]);
     expect(await store.smartWalletRecords(10)).toEqual([]);
+  });
+
+  describe("hold times and conviction (decision D7)", () => {
+    /** A token where `wallet` buys 1 minute in and first sells `holdMs` later at twice the price. */
+    const heldToken = async (store: SqliteHistoryRecorder, mint: string, detectedAt: number, wallet: string, holdMs: number) => {
+      await store.recordToken(token(mint, detectedAt));
+      await store.recordTrade(trade(mint, "dev", "buy", detectedAt, 1, 1000));
+      await store.recordTrade(trade(mint, wallet, "buy", detectedAt + MINUTE, 1, 1000));
+      await store.recordTrade(trade(mint, wallet, "sell", detectedAt + MINUTE + holdMs, 2, 1000));
+    };
+    const RAW = ["tokens", "trades", "screenings", "momentum_snapshots", "token_snapshots"];
+    const dump = (store: SqliteHistoryRecorder, table: string) => JSON.stringify(store.query(`SELECT * FROM ${table} ORDER BY 1, 2`));
+
+    it("stores the first sell before the close and never one after it", async () => {
+      const { store, make } = setup(T0 + 10 * HOUR);
+      await store.recordToken(token("a", T0));
+      await store.recordTrade(trade("a", "w1", "buy", T0 + MINUTE, 1, 1000));
+      await store.recordTrade(trade("a", "w1", "sell", T0 + 3 * MINUTE, 1, 500));
+      await store.recordTrade(trade("a", "w2", "buy", T0 + MINUTE, 1, 1000));
+      await store.recordTrade(trade("a", "w2", "sell", T0 + WINDOW + 1, 1, 1000)); // after the close
+
+      await make().tick();
+
+      expect(store.query("SELECT wallet, first_sell_at FROM wallet_token_results ORDER BY wallet")).toEqual([
+        { wallet: "w1", first_sell_at: T0 + 3 * MINUTE },
+        { wallet: "w2", first_sell_at: null },
+      ]);
+    });
+
+    it("rates conviction from earlier closes only, and a later flip never changes a past style", async () => {
+      const { store, make } = setup(T0 + 30 * HOUR);
+      // Five held wins (10 minutes), closing by T0 + 5h: conviction from then on.
+      for (let i = 0; i < 5; i += 1) await heldToken(store, `held${i}`, T0 + i * HOUR, "w1", 10 * MINUTE);
+      // Bought right after the 5th close: conviction at that buy.
+      await heldToken(store, "x", T0 + 5 * HOUR, "w1", 10 * MINUTE);
+      // Then many flips close; a buy after them is a flipper.
+      for (let i = 0; i < 10; i += 1) await heldToken(store, `flip${i}`, T0 + 6 * HOUR + i * MINUTE, "w1", 30_000);
+      await heldToken(store, "y", T0 + 7 * HOUR + 20 * MINUTE, "w1", 10 * MINUTE);
+
+      await make({ batchSize: 100 }).tick();
+
+      const styleIn = (mint: string) => store.query(`SELECT style_at_entry FROM token_smart_wallets WHERE mint = '${mint}'`);
+      expect(styleIn("x")).toEqual([{ style_at_entry: "conviction" }]);
+      expect(styleIn("y")).toEqual([{ style_at_entry: "flipper" }]);
+      expect(await store.tokenSmartSummary("x")).toEqual({ count: 1, elite: 0, holding: 0, conviction: 1 });
+      expect(await store.tokenSmartSummary("y")).toEqual({ count: 1, elite: 1, holding: 0, conviction: 0 }); // elite by then, but a flipper (10 of 16)
+    });
+
+    it("closes tokens of an older version again, oldest first, backfilling hold times and styles without touching raw tables", async () => {
+      const { store, make } = setup(T0 + 30 * HOUR);
+      for (let i = 0; i < 5; i += 1) await heldToken(store, `held${i}`, T0 + i * HOUR, "w1", 10 * MINUTE);
+      await heldToken(store, "x", T0 + 5 * HOUR, "w1", 10 * MINUTE);
+      await store.recordScreening({ token: token("x", T0), status: "unverified", reason: "test" }, new Date(T0 + 5 * HOUR + MINUTE));
+      await make({ batchSize: 100 }).tick();
+      const derived = ["wallet_token_results", "token_smart_wallets", "smart_wallet_tokens", "smart_wallet_outcomes", "conviction_outcomes"];
+      const expected = derived.map((table) => dump(store, table));
+      const raw = RAW.map((table) => dump(store, table));
+      // What a database closed before D7 looks like.
+      store.query("UPDATE token_closures SET version = NULL");
+      store.query("UPDATE wallet_token_results SET first_sell_at = NULL");
+      store.query("UPDATE token_smart_wallets SET style_at_entry = NULL");
+      store.query("UPDATE smart_wallet_tokens SET conviction = 0");
+      store.query("DELETE FROM conviction_outcomes");
+
+      const restarted = make({ batchSize: 2 });
+      const ticks = [];
+      for (let i = 0; i < 10; i += 1) {
+        const result = await restarted.tick();
+        ticks.push(result.closed);
+        if (!result.backlog) break;
+      }
+
+      expect(ticks).toEqual([2, 2, 2, 0]); // a full batch reports a backlog, so one empty tick ends it
+      expect(derived.map((table) => dump(store, table))).toEqual(expected);
+      expect(RAW.map((table) => dump(store, table))).toEqual(raw);
+      expect(store.query("SELECT COUNT(*) AS n FROM token_closures WHERE version = 2")).toEqual([{ n: 6 }]);
+    });
+
+    it("stores the conviction outcome entered after the k-th conviction wallet's first buy", async () => {
+      const { store, make } = setup(T0 + 30 * HOUR);
+      for (let i = 0; i < 5; i += 1) {
+        await heldToken(store, `c${i}`, T0 + i * HOUR, "conv", 10 * MINUTE);
+        await heldToken(store, `f${i}`, T0 + i * HOUR + 1, "flip", 30_000);
+      }
+      const D = T0 + 6 * HOUR;
+      await store.recordToken(token("z", D));
+      await store.recordTrade(trade("z", "dev", "buy", D, 1, 1000)); // 0.001
+      await store.recordTrade(trade("z", "flip", "buy", D + MINUTE, 1, 500)); // 0.002: smart entry for k=1
+      await store.recordTrade(trade("z", "conv", "buy", D + 2 * MINUTE, 1, 250)); // 0.004: smart k=2, conviction k=1
+      await store.recordTrade(trade("z", "other", "buy", D + 3 * MINUTE, 1, 125)); // 0.008: 2x the conviction entry
+
+      await make({ batchSize: 100 }).tick();
+
+      const range = [new Date(D - 1), new Date(D + 1)] as const;
+      expect(await store.smartWalletOutcomes(...range)).toEqual([
+        { smartWallets: 2, returnPct: 97, reached2x: true, peakX: 2, migrated: false },
+      ]);
+      expect(await store.convictionOutcomes(...range)).toEqual([
+        { smartWallets: 1, returnPct: 97, reached2x: true, peakX: 2, migrated: false },
+      ]);
+      expect(store.query("SELECT entry_price_sol FROM conviction_outcomes WHERE mint = 'z'")).toEqual([{ entry_price_sol: 0.004 }]);
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api-error.js";
-import { parseMinSmartWallets, parseTokenListQuery } from "./token-list-query.js";
+import { parseMinConvictionWallets, parseMinSmartWallets, parseTokenListQuery } from "./token-list-query.js";
 
 const NOW = new Date("2026-11-14T12:00:00.000Z");
 const parse = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW, 1);
@@ -22,7 +22,8 @@ describe("parseTokenListQuery", () => {
       statuses: [],
       lifecycle: null,
       minScore: null,
-      minSmartWallets: 1,
+      minSmartWallets: 0, // D7: an extra filter now, no longer the visibility rule
+      minConvictionWallets: 1,
       search: null,
       sort: { field: "detectedAt", direction: "desc" },
       page: 1,
@@ -42,7 +43,8 @@ describe("parseTokenListQuery", () => {
       statuses: ["passed", "unverified"],
       lifecycle: "dead",
       minScore: 42.5,
-      minSmartWallets: 1,
+      minSmartWallets: 0,
+      minConvictionWallets: 1,
       search: "Pepe",
       sort: { field: "liquidity", direction: "asc" },
       page: 3,
@@ -92,11 +94,12 @@ describe("parseTokenListQuery", () => {
     expect(error.message).toContain(`"${parameter}"`);
   });
 
-  it("reads minSmartWallets as an integer, 1 by default, treating values below 1 as 1", () => {
-    expect(parse("").minSmartWallets).toBe(1);
-    expect(parse("minSmartWallets=0").minSmartWallets).toBe(1);
-    expect(parse("minSmartWallets=-1").minSmartWallets).toBe(1);
-    expect(parse("minSmartWallets=-25").minSmartWallets).toBe(1);
+  // Updated for D7: minSmartWallets is no longer raised to the public minimum (minConvictionWallets is).
+  it("reads minSmartWallets as an integer, 0 by default, treating negative values as 0", () => {
+    expect(parse("").minSmartWallets).toBe(0);
+    expect(parse("minSmartWallets=0").minSmartWallets).toBe(0);
+    expect(parse("minSmartWallets=-1").minSmartWallets).toBe(0);
+    expect(parse("minSmartWallets=-25").minSmartWallets).toBe(0);
     expect(parse("minSmartWallets=3").minSmartWallets).toBe(3);
   });
 
@@ -109,15 +112,27 @@ describe("parseTokenListQuery", () => {
     expect(rejection("minSmartWallets=1.5").message).toBe('Invalid query parameter "minSmartWallets": expected an integer');
   });
 
-  it("uses the configured public minimum as the default and the floor of minSmartWallets", () => {
-    const withMinimum = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW, 5).minSmartWallets;
-    expect(withMinimum("")).toBe(5);
-    expect(withMinimum("minSmartWallets=2")).toBe(5);
-    expect(withMinimum("minSmartWallets=0")).toBe(5);
-    expect(withMinimum("minSmartWallets=7")).toBe(7);
-    expect(parseMinSmartWallets(null, 5)).toBe(5);
-    expect(parseMinSmartWallets("2", 5)).toBe(5);
-    expect(parseMinSmartWallets("6", 5)).toBe(6);
-    expect(() => parseMinSmartWallets("1.5", 5)).toThrow('Invalid query parameter "minSmartWallets": expected an integer');
+  it("uses the configured public minimum as the default and the floor of minConvictionWallets", () => {
+    const withMinimum = (query: string) => parseTokenListQuery(new URLSearchParams(query), NOW, 3).minConvictionWallets;
+    expect(withMinimum("")).toBe(3);
+    expect(withMinimum("minConvictionWallets=2")).toBe(3);
+    expect(withMinimum("minConvictionWallets=0")).toBe(3);
+    expect(withMinimum("minConvictionWallets=-4")).toBe(3);
+    expect(withMinimum("minConvictionWallets=7")).toBe(7);
+    expect(parseMinConvictionWallets(null, 3)).toBe(3);
+    expect(parseMinConvictionWallets("6", 3)).toBe(6);
+    expect(parseTokenListQuery(new URLSearchParams("minSmartWallets=2"), NOW, 3).minSmartWallets).toBe(2);
+    expect(parseMinSmartWallets(null)).toBe(0);
+    for (const invalid of ["1.5", "two", "", "99999999999999999999"]) {
+      expect(() => parseMinConvictionWallets(invalid, 3)).toThrow('Invalid query parameter "minConvictionWallets": expected an integer');
+    }
+  });
+
+  it("sorts by conviction wallets, most first, without changing the sort error message", () => {
+    expect(parse("sort=convictionWallets:desc").sort).toEqual({ field: "convictionWallets", direction: "desc" });
+    expect(parse("sort=convictionWallets").sort).toEqual({ field: "convictionWallets", direction: "desc" });
+    expect(rejection("sort=convictionWallets:asc").message).toBe(
+      'Invalid query parameter "sort": expected one of detectedAt, maxScore, peakMarketCapSol, liquidity with :asc or :desc',
+    );
   });
 });

@@ -1,21 +1,27 @@
 import type { ClosedResult, ReputationStats } from "./closed-result.js";
-import type { WalletRecord, WalletTier } from "./reputation-rules.js";
+import type { WalletRecord, WalletStyle, WalletTier } from "./reputation-rules.js";
 import type { TokenOutcome } from "./smart-wallet-outcome.js";
 import type { ObservedTrade, WalletClosedResult } from "./wallet-positions.js";
 
-/** Good-or-elite wallets (by tier at entry) that bought a token; `holding` = still holding. */
+/**
+ * Good-or-elite wallets (by tier at entry) that bought a token; `holding` = still holding;
+ * `conviction` = of those, the ones whose style at entry was conviction (decision D7).
+ */
 export interface SmartWalletsSummary {
   readonly count: number;
   readonly elite: number;
   readonly holding: number;
+  readonly conviction: number;
 }
 
-export const NO_SMART_WALLETS: SmartWalletsSummary = { count: 0, elite: 0, holding: 0 };
+export const NO_SMART_WALLETS: SmartWalletsSummary = { count: 0, elite: 0, holding: 0, conviction: 0 };
 
 /** A good-or-elite wallet in one token. Its tier is fixed at its first buy of the token. */
 export interface SmartWalletEntry {
   readonly wallet: string;
   readonly tierAtEntry: Exclude<WalletTier, "none">;
+  /** Point-in-time style at the first buy, from the same results as the tier (decision D7). */
+  readonly styleAtEntry: WalletStyle;
   readonly firstBuyAt: Date;
   readonly entrySeconds: number;
   readonly boughtSol: number;
@@ -51,6 +57,8 @@ export interface TokenClose {
   /** Replaces the entries written live, with exact point-in-time tiers. */
   readonly smartWallets: readonly SmartWalletEntry[];
   readonly outcome: TokenOutcome | null;
+  /** The same outcome counting only conviction wallets (entry after the k-th one's first buy). */
+  readonly convictionOutcome?: TokenOutcome | null;
 }
 
 /** A wallet's first buy of a token, to rate it at that moment. */
@@ -82,8 +90,17 @@ export interface WalletReputationStore {
    * Point-in-time stats of each wallet at its buy: only results closed strictly before the buy and
    * within `lookbackMs` before it, other than `excludedMint`. Wallets without results are absent.
    */
-  statsAtBuys(buys: readonly WalletBuy[], lookbackMs: number, excludedMint: string): Promise<Map<string, ReputationStats>>;
-  /** Stores the results, smart wallets and outcome of a token and marks it closed, in one transaction. */
+  statsAtBuys(
+    buys: readonly WalletBuy[],
+    lookbackMs: number,
+    excludedMint: string,
+    flipWindowMs?: number,
+  ): Promise<Map<string, ReputationStats>>;
+  /**
+   * Stores the results, smart wallets and outcomes of a token and marks it closed at the current
+   * close version, in one transaction. Tokens closed at an older version are offered again by
+   * `closableTokens`, oldest first, so their new fields are backfilled.
+   */
   saveTokenClose(close: TokenClose): Promise<void>;
   /** Results of the wallets closed at or after `since`, newest first buy first. */
   walletResults(wallets: readonly string[], since: Date): Promise<StoredWalletResult[]>;
@@ -100,6 +117,10 @@ export interface WalletReputationStore {
   tokenSmartSummary(mint: string): Promise<SmartWalletsSummary>;
   /** The given mints that have at least `minSmartWallets` stored smart wallets. */
   mintsWithSmartWallets(mints: readonly string[], minSmartWallets: number): Promise<Set<string>>;
+  /** The given mints that have at least `minConvictionWallets` stored conviction wallets. */
+  mintsWithConvictionWallets(mints: readonly string[], minConvictionWallets: number): Promise<Set<string>>;
   /** Outcomes of closed tokens detected in [`from`, `to`). */
   smartWalletOutcomes(from: Date, to: Date): Promise<StoredOutcome[]>;
+  /** Conviction-wallet outcomes of closed tokens detected in [`from`, `to`) (`smartWallets` = conviction wallets). */
+  convictionOutcomes(from: Date, to: Date): Promise<StoredOutcome[]>;
 }

@@ -21,7 +21,7 @@ export interface Mover {
   /** Latest liquidity seen in the token's trades. */
   readonly liquidity: Liquidity;
   readonly snapshot: MomentumSnapshot;
-  /** Good-or-elite wallets that bought the token so far. */
+  /** Good-or-elite wallets that bought the token so far, and how many had the conviction style. */
   readonly smartWallets: SmartWalletsSummary;
 }
 
@@ -74,10 +74,10 @@ interface TokenState {
 /** Use case: in-memory view of what is happening right now, plus an event bus for live clients. */
 export class LiveFeed {
   /**
-   * @param publicMinSmartWallets good-or-elite wallets a token needs before public listeners hear
-   * about it (`PUBLIC_MIN_SMART_WALLETS`, docs/API.md "Public visibility rule").
+   * @param publicMinConvictionWallets conviction wallets at entry a token needs before public
+   * listeners hear about it (`PUBLIC_MIN_CONVICTION_WALLETS`, docs/API.md "Public visibility rule").
    */
-  constructor(private readonly publicMinSmartWallets: number) {}
+  constructor(private readonly publicMinConvictionWallets: number) {}
 
   private readonly tokens = new Map<string, TokenState>();
   private readonly listeners = new Set<LiveListener>();
@@ -194,14 +194,17 @@ export class LiveFeed {
     return count;
   }
 
-  /** Latest ranking with current smart-wallet counts; only movers with at least `minSmartWallets` of them. */
-  getMovers(limit: number, minSmartWallets = 0): { at: Date | null; movers: readonly Mover[] } {
+  /**
+   * Latest ranking with current smart-wallet counts; only movers with at least `minSmartWallets`
+   * smart wallets and `minConvictionWallets` conviction wallets.
+   */
+  getMovers(limit: number, minSmartWallets = 0, minConvictionWallets = 0): { at: Date | null; movers: readonly Mover[] } {
     const movers = this.movers
       .map((mover) => {
         const current = this.tokens.get(mover.token.mint)?.smartWallets;
         return current === undefined || current === mover.smartWallets ? mover : { ...mover, smartWallets: current };
       })
-      .filter((mover) => mover.smartWallets.count >= minSmartWallets);
+      .filter((mover) => mover.smartWallets.count >= minSmartWallets && mover.smartWallets.conviction >= minConvictionWallets);
     return { at: this.moversAt, movers: movers.slice(0, limit) };
   }
 
@@ -214,18 +217,18 @@ export class LiveFeed {
     return this.tokens.get(mint)?.smartWallets ?? NO_SMART_WALLETS;
   }
 
-  /** The token has at least `publicMinSmartWallets` live good-or-elite wallets. */
+  /** The token has at least `publicMinConvictionWallets` live conviction wallets (flippers never count). */
   isPublic(mint: string): boolean {
     return this.isPublicSummary(this.smartWalletsOf(mint));
   }
 
   private isPublicSummary(summary: SmartWalletsSummary): boolean {
-    return summary.count >= this.publicMinSmartWallets;
+    return summary.conviction >= this.publicMinConvictionWallets;
   }
 
   /**
    * Events of public tokens only: a token appears (`token`, then its latest `screening`) when its
-   * smart-wallet count reaches `publicMinSmartWallets`; `momentum` lists only public movers;
+   * conviction-wallet count reaches `publicMinConvictionWallets`; `momentum` lists only public movers;
    * `status` is unchanged.
    */
   subscribePublic(listener: LiveListener): () => void {

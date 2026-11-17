@@ -9,6 +9,7 @@ const NOW = new Date("2026-11-16T12:00:00.000Z");
 const result = (pnlSol: number, closedAt: Date, overrides: Partial<ClosedResult> = {}): ClosedResult => ({
   mint: `m${closedAt.getTime()}${pnlSol}`,
   firstBuyAt: new Date(closedAt.getTime() - 30 * 60_000),
+  firstSellAt: null,
   entrySeconds: 10,
   boughtSol: 1,
   soldSol: 1 + pnlSol,
@@ -78,6 +79,7 @@ describe("statsAt (point in time)", () => {
       tokens: 2,
       wins: 1,
       netPnlSol: 0.5,
+      flips: 0, // D7: stats also count flips
     });
   });
 
@@ -88,7 +90,7 @@ describe("statsAt (point in time)", () => {
 
     const atBuy = statsAt(future, buyAt, DEFAULT_REPUTATION_RULES.lookbackMs);
 
-    expect(atBuy).toEqual({ tokens: 0, wins: 0, netPnlSol: 0 });
+    expect(atBuy).toEqual({ tokens: 0, wins: 0, netPnlSol: 0, flips: 0 });
     expect(tierOf(atBuy, DEFAULT_REPUTATION_RULES)).toBe("none");
     expect(tierOf(statsAt(future, NOW, DEFAULT_REPUTATION_RULES.lookbackMs), DEFAULT_REPUTATION_RULES)).toBe("elite");
   });
@@ -135,6 +137,10 @@ describe("walletRecord", () => {
       netPnlSol: 5.5,
       avgPnlSol: 0.916666667,
       medianEntrySeconds: 10,
+      // D7 fields: never sold in its windows, so no flips and no hold time.
+      style: "conviction",
+      flipRate: 0,
+      medianHoldSeconds: null,
       lastActiveAt: new Date(NOW.getTime() - HOUR - 30 * 60_000),
       updatedAt: NOW,
     });
@@ -151,6 +157,9 @@ describe("walletRecord", () => {
       netPnlSol: 0,
       avgPnlSol: 0,
       medianEntrySeconds: null,
+      style: "unrated",
+      flipRate: null,
+      medianHoldSeconds: null,
       lastActiveAt: null,
       updatedAt: NOW,
     });

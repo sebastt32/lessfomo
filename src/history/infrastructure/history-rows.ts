@@ -142,12 +142,13 @@ export const momentumValues = (snapshot: MomentumSnapshot): SqlValue[] => {
 
 /** Summary columns joined into token lists (alias `w`). */
 export const SMART_SUMMARY_COLUMNS =
-  "COALESCE(w.wallets, 0) AS sw_count, COALESCE(w.elite, 0) AS sw_elite, COALESCE(w.holding, 0) AS sw_holding";
+  "COALESCE(w.wallets, 0) AS sw_count, COALESCE(w.elite, 0) AS sw_elite, COALESCE(w.holding, 0) AS sw_holding, COALESCE(w.conviction, 0) AS sw_conviction";
 
 export const toSmartWalletsSummary = (row: Row): SmartWalletsSummary => ({
   count: Number(row["sw_count"] ?? 0),
   elite: Number(row["sw_elite"] ?? 0),
   holding: Number(row["sw_holding"] ?? 0),
+  conviction: Number(row["sw_conviction"] ?? 0),
 });
 
 /** Screenings with their token's name, creation time and smart wallets (aliases `s`, `t`, `w`). */
@@ -156,13 +157,25 @@ export const SCREENINGS_WITH_TOKEN = `
   FROM screenings s LEFT JOIN tokens t ON t.mint = s.mint LEFT JOIN smart_wallet_tokens w ON w.mint = s.mint`;
 
 /**
- * Newest screenings first, insertion order breaking ties; parameter 1 = limit, 2 = minimum smart
- * wallets (only used when above 0, so the default query is unchanged).
+ * Newest screenings first, insertion order breaking ties; parameter 1 = limit, then the minimum
+ * smart wallets and the minimum conviction wallets, each only when above 0 (so the default query
+ * is unchanged). `recentScreeningsParams` builds the matching parameters.
  */
-export const recentScreeningsSql = ({ param }: ChartDialect, minSmartWallets: number): string =>
-  `${SCREENINGS_WITH_TOKEN}${
-    minSmartWallets > 0 ? ` WHERE w.wallets >= ${param(2)}` : ""
+export const recentScreeningsSql = ({ param }: ChartDialect, minSmartWallets: number, minConvictionWallets = 0): string => {
+  const where: string[] = [];
+  let next = 2;
+  if (minSmartWallets > 0) where.push(`w.wallets >= ${param(next++)}`);
+  if (minConvictionWallets > 0) where.push(`w.conviction >= ${param(next++)}`);
+  return `${SCREENINGS_WITH_TOKEN}${
+    where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""
   } ORDER BY s.evaluated_at DESC, s.id DESC LIMIT ${param(1)}`;
+};
+
+export const recentScreeningsParams = (limit: number, minSmartWallets: number, minConvictionWallets = 0): number[] => [
+  limit,
+  ...(minSmartWallets > 0 ? [minSmartWallets] : []),
+  ...(minConvictionWallets > 0 ? [minConvictionWallets] : []),
+];
 
 /**
  * Placeholder for the n-th (1-based) query parameter: `?n` in SQLite, `$n` in PostgreSQL.
