@@ -18,6 +18,39 @@ Conventions:
 - Generic errors: `404 NOT_FOUND` (unknown route), `405 METHOD_NOT_ALLOWED` (anything but `GET`/`OPTIONS`),
   `400 BAD_REQUEST` (unparseable request target), `500 INTERNAL_ERROR` (never includes internal details).
 
+## Authentication
+
+Every endpoint and stream except `GET /api/health` and `POST /api/auth/login` requires a signed-in
+session. Without one they answer `401 { "error": { "code": "UNAUTHENTICATED", ... } }` and reveal
+nothing (the check runs before validation and before the public visibility rule).
+
+The session is a cookie named `lessfomo_session` (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` over
+HTTPS), valid for 7 days from the last request. Browsers on another origin (local development) must
+send credentials (`fetch` with `credentials: "include"`, `EventSource` with `withCredentials`); CORS
+answers allowed origins with `Access-Control-Allow-Credentials: true`.
+
+State-changing requests must send `Content-Type: application/json`; when an `Origin` header is
+present it must be the API's own origin or an allowed CORS origin, otherwise `403 FORBIDDEN_ORIGIN`.
+
+```ts
+interface SessionUser { username: string; role: "superadmin"; }
+```
+
+| Endpoint | Body | Success | Errors |
+| --- | --- | --- | --- |
+| `POST /api/auth/login` | `{ "username": string, "password": string }` | `200 { "user": SessionUser }` + session cookie | `400 INVALID_BODY`, `401 INVALID_CREDENTIALS` (same answer for unknown user and wrong password), `429 TOO_MANY_ATTEMPTS` with `Retry-After` seconds (5 failures per username and client IP in 15 minutes) |
+| `GET /api/auth/me` | — | `200 { "user": SessionUser }` | `401 UNAUTHENTICATED` |
+| `POST /api/auth/logout` | — | `204`, cookie cleared, session deleted | — (also `204` without a session) |
+| `POST /api/auth/password` | `{ "currentPassword": string, "newPassword": string }` | `204`; every other session of the user is deleted | `401 UNAUTHENTICATED`, `401 INVALID_CREDENTIALS` (wrong current password), `400 WEAK_PASSWORD` (new password shorter than 12 characters or equal to the current one) |
+
+Other methods than `GET`/`OPTIONS` stay `405 METHOD_NOT_ALLOWED` outside `/api/auth/*`. There is no
+public sign-up: the super admin is created on the server with `node dist/create-superadmin.js`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AUTH_COOKIE_SECURE` | unset | `true` forces the `Secure` cookie flag; by default it follows `X-Forwarded-Proto` |
+| `AUTH_SESSION_DAYS` | `7` | Session lifetime in days (sliding) |
+
 ## Types
 
 ```ts
