@@ -45,11 +45,18 @@ export class LiveStreams implements BeforeApplicationShutdown {
     this.stopListening = auth.onSessionRevoked((tokenHash) => this.closeSession(tokenHash));
   }
 
-  /** `GET /api/stream`: the current source statuses, then every live event of public tokens. */
+  /**
+   * `GET /api/stream`: the current source statuses and the known SOL/USD price, then every live event of
+   * public tokens and every price change.
+   */
   openFeed(request: IncomingMessage, response: ServerResponse): void {
-    const { feed } = this;
-    this.open(request, response, [{ name: "status", data: { sources: feed.getSources() } }], (send) => [
+    const { feed, solPrice } = this;
+    const solUsd = solPrice.current();
+    const initial: SseEvent[] = [{ name: "status", data: { sources: feed.getSources() } }];
+    if (solUsd !== null) initial.push({ name: "sol-price", data: { solUsd } });
+    this.open(request, response, initial, (send) => [
       feed.subscribePublic((event) => send(liveEventView(event))),
+      solPrice.subscribe((price) => send({ name: "sol-price", data: { solUsd: price } })),
     ]);
   }
 

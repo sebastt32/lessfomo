@@ -791,6 +791,20 @@ describe("API (Nest e2e)", () => {
 
       expect(text).toBe('retry: 5000\n\nevent: status\ndata: {"sources":{"pumpportal":"connecting","solanaLogs":"connecting"}}\n\n');
     });
+
+    it("sends the known SOL/USD price on the feed stream right after the status, then its changes", async () => {
+      const { solPrice, base } = await start();
+      solPrice.price = 142.31;
+
+      const response = await fetch(`${base}/api/stream`);
+      setTimeout(() => solPrice.set(150.5), 20);
+      const text = await readSse(response, (t) => t.includes('"solUsd":150.5'));
+
+      expect(text).toBe(
+        'retry: 5000\n\nevent: status\ndata: {"sources":{"pumpportal":"connecting","solanaLogs":"connecting"}}\n\n' +
+          'event: sol-price\ndata: {"solUsd":142.31}\n\nevent: sol-price\ndata: {"solUsd":150.5}\n\n',
+      );
+    });
   });
 
   describe("public visibility rule", () => {

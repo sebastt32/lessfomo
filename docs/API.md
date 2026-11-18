@@ -537,5 +537,6 @@ Every event's `data` is JSON.
 | `screening` | `ScreeningView` | A safety check finishes |
 | `momentum` | `{ "at": string, "movers": Mover[] }` (top 20) | Every minute |
 | `status` | `{ "sources": { "pumpportal": SourceStatus, "solanaLogs": SourceStatus } }` | Once right after connecting, then whenever a data source connects or disconnects |
+| `sol-price` | `{ "solUsd": number }` | Right after `status` when the SOL/USD price is known, then whenever it changes (the same price as `/api/tokens/:mint/stream`; clients turn SOL amounts into USD with it) |
 
 A comment line (`: ping`) is sent every 15 seconds to keep the connection open.
